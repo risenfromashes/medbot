@@ -1003,15 +1003,19 @@ export class Db {
       );
     }
 
-    for (const meal of presc.meals) {
+    // Ordered, because "the meal after breakfast" has to mean something: the planner
+    // spaces each meal from the previous one and derives its assumed time from the
+    // patient's waking. Without a sequence every meal looked like the first one.
+    for (const [index, meal] of presc.meals.entries()) {
       stmts.push(
         this.d1
           .prepare(
-            `INSERT INTO meal_defs (patient_id, meal, typical_local, ask_after_local, presume_at_local)
-             VALUES (?1,?2,?3,?4,?5)
-             ON CONFLICT (patient_id, meal) DO UPDATE SET typical_local = ?3, ask_after_local = ?4, presume_at_local = ?5`,
+            `INSERT INTO meal_defs (patient_id, meal, typical_local, ask_after_local, presume_at_local, seq)
+             VALUES (?1,?2,?3,?4,?5,?6)
+             ON CONFLICT (patient_id, meal) DO UPDATE SET
+               typical_local = ?3, ask_after_local = ?4, presume_at_local = ?5, seq = ?6`,
           )
-          .bind(patientId, meal.meal, meal.typicalLocal, meal.askAfterLocal, meal.presumeAtLocal),
+          .bind(patientId, meal.meal, meal.typicalLocal, meal.askAfterLocal, meal.presumeAtLocal, index),
       );
     }
 

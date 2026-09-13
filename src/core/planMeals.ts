@@ -33,8 +33,16 @@ export interface MealFacts {
 
 /** How often to re-ask an unanswered meal question. */
 const MEAL_POLL = 45 * MINUTE;
-/** Default delay from waking to the first meal question. */
-const DEFAULT_AFTER_WAKE = 30 * MINUTE;
+/** Assumed gap from waking to the first meal of the day. */
+const DEFAULT_AFTER_WAKE = 45 * MINUTE;
+/**
+ * How far ahead of an assumed meal to ask about it.
+ *
+ * This is the whole point of asking early: a tablet due half an hour before food needs
+ * that half hour to exist. The lead is widened to cover the longest before-meal offset of
+ * any medicine tied to this meal, so there is always time to take it.
+ */
+const MIN_LEAD = 30 * MINUTE;
 /** How long after a planned time to keep asking before assuming it happened. */
 const PRESUME_AFTER_PLAN = 2 * HOUR;
 
@@ -49,7 +57,23 @@ function ordered(defs: MealDef[]): MealDef[] {
 
 /** Sensible spacing when a prescription did not say. */
 function defaultAfterWake(index: number): number {
-  return DEFAULT_AFTER_WAKE + index * 5 * HOUR;
+  return DEFAULT_AFTER_WAKE + index * 5.25 * HOUR;
+}
+
+/** How far ahead of this meal we must ask, given what is meant to be taken before it. */
+function leadFor(state: PatientState, meal: string): number {
+  let lead = MIN_LEAD;
+  for (const med of state.meds) {
+    if (med.status !== 'active') continue;
+    const refs = med.spec.meals ?? (med.spec.meal === undefined ? [] : [med.spec.meal]);
+    for (const ref of refs) {
+      if (ref.meal === meal && ref.relation === 'before') {
+        // Ten minutes of slack on top, so the tablet is not due the instant we ask.
+        lead = Math.max(lead, ref.offsetMs + 10 * MINUTE);
+      }
+    }
+  }
+  return lead;
 }
 
 export function planMeals(
@@ -89,14 +113,28 @@ export function planMeals(
       continue;
     }
 
-    // --- when should we first ask? -----------------------------------------
-    // Measured from waking, and never bunched against the previous meal. The configured
-    // clock time is a floor only when there is no wake anchor to work from.
+    // --- when is this meal assumed to be? ----------------------------------
+    // Derived from waking rather than the clock, and never bunched against the previous
+    // meal. Someone who got up at noon is not late for breakfast.
     const afterWake = def.afterWakeMs ?? defaultAfterWake(index);
-    let askFrom = wakeAnchor + afterWake;
+    let assumedAt = wakeAnchor + afterWake;
     if (previousMealAt !== null) {
-      askFrom = Math.max(askFrom, previousMealAt + (def.minGapAfterPrevMs || 3 * HOUR));
+      assumedAt = Math.max(assumedAt, previousMealAt + (def.minGapAfterPrevMs || 3 * HOUR));
     }
+    const lead = leadFor(state, def.meal);
+
+    // Two different times, and conflating them is a trap.
+    //
+    // `originalAssumed` is where the day suggests this meal falls, and it is what the
+    // give-up deadline is measured against -- otherwise pushing the proposal forward on
+    // every tick would mean the meal is never presumed and every after-meal tablet waits
+    // for ever.
+    //
+    // `assumedAt` is what we actually propose, never in the past, because asking
+    // "breakfast around half past?" at a quarter to is confusing and leaves no room for
+    // the tablet that goes before it.
+    const originalAssumed = assumedAt;
+    if (awake && assumedAt < now + lead) assumedAt = now + lead;
 
     // --- they told us when they are eating ----------------------------------
     if (event !== undefined && event.source === 'planned') {
@@ -116,7 +154,7 @@ export function planMeals(
           if (!hasOpenMealPrompt(def.meal, 'confirm')) {
             emit({
               t: 'createPrompt', id: 0, kind: 'meal', tier: 0,
-              body: { kind: 'meal', doseIds: [], meal: def.meal, stage: 'confirm' },
+              body: { kind: 'meal', doseIds: [], meal: def.meal, stage: 'confirm', proposedAt: event.at },
             });
           }
           wakeUps.push(now + MEAL_POLL);
@@ -128,23 +166,35 @@ export function planMeals(
       continue;
     }
 
-    // --- nothing known yet: predict, and ask ---------------------------------
-    // The prediction has to exist even before they answer, or a before-meal medicine
-    // would have nothing to aim at. It follows the day rather than the clock.
-    const predicted = Math.max(askFrom + HOUR, now);
-    meals.set(def.meal, { at: predicted, confirmed: false, planned: false });
-    previousMealAt = predicted;
+    // --- nothing said yet: assume, but ask in time to act on the answer ------
+    // The assumption stands in so a before-meal tablet always has something to aim at,
+    // and someone who answers nothing still gets their medicines. But it is a proposal,
+    // not a decision: the patient is asked to confirm or push it back, far enough ahead
+    // that the tablet due before the meal still has its half hour.
+    meals.set(def.meal, { at: assumedAt, confirmed: false, planned: false });
+    previousMealAt = assumedAt;
 
-    if (awake && now >= askFrom) {
+    const askAt = assumedAt - lead;
+
+    if (awake && now >= askAt) {
       if (!hasOpenMealPrompt(def.meal, 'plan')) {
         emit({
           t: 'createPrompt', id: 0, kind: 'meal', tier: 0,
-          body: { kind: 'meal', doseIds: [], meal: def.meal, stage: 'plan' },
+          body: { kind: 'meal', doseIds: [], meal: def.meal, stage: 'plan', proposedAt: assumedAt },
         });
       }
       wakeUps.push(now + MEAL_POLL);
-    } else if (askFrom > now) {
-      wakeUps.push(askFrom);
+      // And once the originally assumed time is well past, fall through to presuming it
+      // happened rather than leaving after-meal medicines waiting indefinitely.
+      wakeUps.push(originalAssumed + PRESUME_AFTER_PLAN);
+
+      if (now >= originalAssumed + PRESUME_AFTER_PLAN) {
+        emit({ t: 'recordMeal', meal: def.meal, localDay: today, at: originalAssumed, source: 'presumed', plannedAt: null });
+        emit({ t: 'closeMealPrompt', meal: def.meal });
+        meals.set(def.meal, { at: originalAssumed, confirmed: true, planned: true });
+      }
+    } else if (askAt > now) {
+      wakeUps.push(askAt);
     }
   }
 

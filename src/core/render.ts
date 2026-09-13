@@ -168,8 +168,11 @@ export function renderMealPrompt(
   forCaregiver: boolean,
   patientName: string,
   stage: 'plan' | 'confirm' = 'plan',
+  proposedAt?: number,
+  z?: Zone,
 ): Rendered {
   const nice = meal.charAt(0).toUpperCase() + meal.slice(1);
+  const when = proposedAt !== undefined && z !== undefined ? z.fmtTime12(proposedAt) : null;
 
   if (stage === 'confirm') {
     return {
@@ -178,18 +181,43 @@ export function renderMealPrompt(
         : `🍽 Having ${esc(meal)} now?`,
       buttons: [
         [
-          { text: `✅ Eating now`, callback_data: encodeCallback({ a: 'ate', meal }) },
-          { text: '🕐 Another 30 min', callback_data: encodeCallback({ a: 'planMeal', meal, inMinutes: 30 }) },
+          { text: '✅ Eating now', callback_data: encodeCallback({ a: 'ate', meal }) },
+          { text: '🕐 +30 min', callback_data: encodeCallback({ a: 'planMeal', meal, inMinutes: 30 }) },
+          { text: '🕐 +1 hour', callback_data: encodeCallback({ a: 'planMeal', meal, inMinutes: 60 }) },
         ],
         [{ text: '⏭ Skipping it', callback_data: encodeCallback({ a: 'skipMeal', meal }) }],
       ],
     };
   }
 
+  // Proposing a time rather than asking openly: one tap to agree, one to push it back.
+  // Asked early enough that whatever goes before the meal still has time to be taken.
+  if (when !== null && proposedAt !== undefined) {
+    const delay = (mins: number, label: string): InlineButton => ({
+      text: label,
+      callback_data: encodeCallback({ a: 'mealAt', meal, at: proposedAt + mins * MINUTE }),
+    });
+    return {
+      text: forCaregiver
+        ? `🍽 ${esc(patientName)} hasn't confirmed ${esc(meal)} around ${when}.`
+        : `🍽 Having <b>${esc(nice.toLowerCase())}</b> around ${when}?\n` +
+          `<i>Just so I can time the tablets that go before and after it.</i>`,
+      buttons: [
+        [
+          { text: `✅ Yes, ${when}`, callback_data: encodeCallback({ a: 'mealAt', meal, at: proposedAt }) },
+          { text: '🍽 Eating now', callback_data: encodeCallback({ a: 'ate', meal }) },
+        ],
+        [delay(30, '🕐 Later, +30 min'), delay(60, '🕐 +1 hour'), delay(120, '🕐 +2 hours')],
+        [{ text: '⏭ Skipping it', callback_data: encodeCallback({ a: 'skipMeal', meal }) }],
+      ],
+    };
+  }
+
+  // No proposal to offer, so fall back to asking outright.
   return {
     text: forCaregiver
       ? `🍽 ${esc(patientName)} hasn't said when they're having ${esc(meal)}.`
-      : `🍽 When are you having ${esc(nice.toLowerCase())}?\n<i>So I can time the tablets that go before or after it.</i>`,
+      : `🍽 When are you having ${esc(nice.toLowerCase())}?`,
     buttons: [
       [
         { text: 'In ~30 min', callback_data: encodeCallback({ a: 'planMeal', meal, inMinutes: 30 }) },

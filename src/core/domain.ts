@@ -314,10 +314,13 @@ export interface PromptBody {
   doseIds: number[];
   meal?: string;
   /**
-   * Which question is being asked about the meal: when are you eating, or are you eating
-   * now. The first is what makes "half an hour before breakfast" schedulable at all.
+   * Which question is being asked about the meal. `plan` proposes a time and asks whether
+   * it is right -- asked far enough ahead that a before-meal tablet still has time to be
+   * taken. `confirm` asks, at that time, whether the meal is actually happening.
    */
   stage?: 'plan' | 'confirm';
+  /** The time being proposed, so the question can name it rather than ask openly. */
+  proposedAt?: number;
   /** For a dose prompt tied to an upcoming meal, so the message can say why. */
   beforeMeal?: { meal: string; inMs: number };
   text?: string;

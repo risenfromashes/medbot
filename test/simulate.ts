@@ -185,6 +185,8 @@ export class World {
   notes: Array<{ at: number; kind: string; detail: Record<string, unknown> }> = [];
   /** Every dose ever created, live or resolved. */
   allDoses: Dose[] = [];
+  /** Every prompt ever created, open or closed. */
+  allPrompts: Prompt[] = [];
 
   private nextDoseId = 1;
   private nextPromptId = 1;
@@ -427,8 +429,24 @@ export class World {
           if (d !== undefined) {
             d.effectiveDueAt = a.effectiveDueAt;
             if (a.anchorKind !== undefined) d.anchorKind = a.anchorKind;
+            // Mirrors db.ts exactly. A dose moved onto a new wake or meal anchor belongs
+            // to that anchor, so its planned time moves with it and drift is measured
+            // from the new grid. Leaving this out made the simulator quietly disagree
+            // with production about where the grid was.
+            if ((a.anchorKind === 'wake' || a.anchorKind === 'meal') && a.effectiveDueAt > this.now) {
+              d.plannedDueAt = a.effectiveDueAt;
+              if (d.promptId !== null) {
+                const q = this.state.openPrompts.find((x) => x.id === d.promptId);
+                if (q !== undefined) q.state = 'cancelled';
+                d.promptId = null;
+              }
+              if (d.status === 'due' || d.status === 'prompted') d.status = 'scheduled';
+            } else if (a.anchorKind === 'wake' || a.anchorKind === 'meal') {
+              d.plannedDueAt = a.effectiveDueAt;
+            }
             if (d.status === 'deferred') d.status = 'scheduled';
           }
+          this.state.openPrompts = this.state.openPrompts.filter((q) => q.state === 'open');
           break;
         }
 
@@ -466,6 +484,7 @@ export class World {
             createdAt: this.now,
           };
           this.state.openPrompts.push(prompt);
+          this.allPrompts.push(prompt);
           for (const did of doseIds) {
             const d = this.state.liveDoses.find((x) => x.id === did);
             if (d !== undefined) {

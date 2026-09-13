@@ -18,6 +18,8 @@ export type Callback =
   | { a: 'ate'; meal: string }
   /** "I'm eating in about N minutes" -- what makes a before-meal dose schedulable. */
   | { a: 'planMeal'; meal: string; inMinutes: number }
+  /** "Yes, around then" or "push it back" -- an answer to a proposed meal time. */
+  | { a: 'mealAt'; meal: string; at: number }
   | { a: 'skipMeal'; meal: string }
   | { a: 'confirmImport'; versionId: number }
   /** Open the tap-through edit menu for a medicine. */
@@ -41,6 +43,9 @@ export function encodeCallback(cb: Callback): string {
     case 'sleep': return 'b';
     case 'ate': return `m.${cb.meal}`;
     case 'planMeal': return `p.${cb.meal}.${b36(cb.inMinutes)}`;
+    // Minutes since the epoch, which is nine base-36 characters -- comfortably inside
+    // Telegram's 64-byte callback_data limit, and precise enough for a meal.
+    case 'mealAt': return `M.${cb.meal}.${b36(Math.round(cb.at / 60_000))}`;
     case 'skipMeal': return `x.${cb.meal}`;
     case 'editMenu': return `E.${b36(cb.medId)}`;
     // field and value are short tokens, well inside the 64-byte callback_data cap.
@@ -69,6 +74,10 @@ export function decodeCallback(data: string): Callback {
     case 'p':
       return parts[1] !== undefined && Number.isFinite(n(2))
         ? { a: 'planMeal', meal: parts[1], inMinutes: Math.max(0, n(2)) }
+        : { a: 'noop' };
+    case 'M':
+      return parts[1] !== undefined && Number.isFinite(n(2)) && n(2) > 0
+        ? { a: 'mealAt', meal: parts[1], at: n(2) * 60_000 }
         : { a: 'noop' };
     case 'x': return parts[1] !== undefined ? { a: 'skipMeal', meal: parts[1] } : { a: 'noop' };
     case 'E': return valid(n(1)) ? { a: 'editMenu', medId: n(1) } : { a: 'noop' };

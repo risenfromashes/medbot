@@ -132,7 +132,7 @@ export async function handleCallback(
   }
 
   // --- meals ---------------------------------------------------------------
-  if (cb.a === 'planMeal') {
+  if (cb.a === 'mealAt' || cb.a === 'planMeal') {
     const link = links.find((l) => l.role === 'patient') ?? links[0]!;
     const patient = await db.getPatient(link.patientId);
     if (patient === null) {
@@ -140,7 +140,9 @@ export async function handleCallback(
       return;
     }
     const z = zoneFor(patient.tz);
-    const plannedAt = now + cb.inMinutes * MINUTE;
+    // Either "yes, around then" / "push it back" against a proposed time, or a plain
+    // "in about an hour".
+    const plannedAt = cb.a === 'mealAt' ? cb.at : now + cb.inMinutes * MINUTE;
     await db.recordMeal(patient.id, cb.meal, z.localDay(now), plannedAt, 'planned', plannedAt);
     await db.wakeNow(patient.id, now);
     for (const prompt of await db.openPromptsFor(patient.id)) {

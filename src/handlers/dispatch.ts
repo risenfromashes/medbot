@@ -77,7 +77,10 @@ function renderFor(
     case 'sleep':
       return renderSleepPrompt(forCaregiver, name);
     case 'meal':
-      return renderMealPrompt(prompt.body.meal ?? 'a meal', forCaregiver, name, prompt.body.stage ?? 'plan');
+      return renderMealPrompt(
+        prompt.body.meal ?? 'a meal', forCaregiver, name,
+        prompt.body.stage ?? 'plan', prompt.body.proposedAt, z,
+      );
     case 'info':
       return { text: prompt.body.text ?? '', buttons: [] };
   }

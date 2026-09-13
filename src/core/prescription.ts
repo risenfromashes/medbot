@@ -189,6 +189,10 @@ export function parsePrescription(raw: unknown, opts: { now: number } = { now: D
     meals.push({ meal: id, typicalLocal: typical!, askAfterLocal: ask!, presumeAtLocal: presume });
   }
 
+  // Sorted by their usual time, so "the meal after breakfast" is well defined however the
+  // prescription happened to list them.
+  meals.sort((a, b) => a.typicalLocal.localeCompare(b.typicalLocal));
+
   // --- spacing groups ----------------------------------------------------
   const groupSpacing = new Map<string, number>();
   const groupsRaw = Array.isArray(raw['groups']) ? raw['groups'] : [];

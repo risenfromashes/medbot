@@ -38,6 +38,11 @@ function world(wakeAt: number): World {
   return w;
 }
 
+/** Agree to, or push back, a proposed meal time. */
+function planMealAt(w: World, meal: string, at: number): void {
+  planMeal(w, meal, at - w.now);
+}
+
 /** Answer a "when are you eating?" question. */
 function planMeal(w: World, meal: string, inMs: number): void {
   const day = w.z.localDay(w.now);
@@ -52,23 +57,69 @@ function planMeal(w: World, meal: string, inMs: number): void {
 }
 
 describe('the bot asks when you will eat, rather than assuming', () => {
-  it('asks shortly after you get up, whenever that is', () => {
+  it('asks ahead of the meal, with time to take what goes before it', () => {
     const w = world(at(0, '11:00'));
-    w.run(2 * HOUR);
+    w.run(3 * HOUR);
 
     const ask = w.sent.find((s) => s.kind === 'meal');
     expect(ask, 'never asked about breakfast').toBeDefined();
-    // Half an hour after waking, not at a breakfast time someone else chose.
-    expect(ask!.at).toBeGreaterThanOrEqual(at(0, '11:25'));
-    expect(ask!.at).toBeLessThanOrEqual(at(0, '11:45'));
+
+    const prompt = w.state.openPrompts.find((q) => q.kind === 'meal' && q.body.stage === 'plan')
+      ?? w.allPrompts.find((q) => q.kind === 'meal' && q.body.stage === 'plan');
+    expect(prompt?.body.proposedAt, 'the question proposed no time').toBeDefined();
+
+    // Asked at least half an hour before the meal it is proposing, because the tablet
+    // due half an hour before food needs that half hour to exist.
+    expect(prompt!.body.proposedAt! - ask!.at).toBeGreaterThanOrEqual(30 * MINUTE);
+    // And the proposal follows waking rather than a clock time someone else chose.
+    expect(prompt!.body.proposedAt!).toBeGreaterThan(at(0, '11:00'));
+    expect(prompt!.body.proposedAt!).toBeLessThanOrEqual(at(0, '12:30'));
+  });
+
+  it('proposes a time rather than asking an open question', () => {
+    const w = world(at(0, '08:00'));
+    w.run(2 * HOUR);
+    const prompt = w.allPrompts.find((q) => q.kind === 'meal' && q.body.stage === 'plan');
+    expect(prompt, 'no meal question was asked').toBeDefined();
+    expect(prompt!.body.proposedAt, 'asked openly instead of proposing a time').toBeDefined();
   });
 
   it('asks the forward-looking question first, not "have you eaten"', () => {
     const w = world(at(0, '08:00'));
     w.run(90 * MINUTE);
-    const prompt = w.state.openPrompts.find((q) => q.kind === 'meal');
+    const prompt = w.allPrompts.find((q) => q.kind === 'meal');
     expect(prompt, 'no meal question was asked').toBeDefined();
     expect(prompt!.body.stage, 'asked whether they had eaten instead of when they would').toBe('plan');
+  });
+
+  it('keeps the proposed time when you agree with it', () => {
+    const w = world(at(0, '08:00'));
+    w.run(2 * HOUR);
+    const prompt = w.allPrompts.find((q) => q.kind === 'meal' && q.body.stage === 'plan')!;
+    const proposed = prompt.body.proposedAt!;
+
+    // "Yes, around then" -- the assumption is kept exactly, not re-derived.
+    planMealAt(w, 'breakfast', proposed);
+    w.run(5 * MINUTE);
+
+    const event = w.state.mealEvents.find((e) => e.meal === 'breakfast')!;
+    expect(event.at).toBe(proposed);
+    expect(event.source).toBe('planned');
+  });
+
+  it('pushes the meal back when you say later', () => {
+    const w = world(at(0, '08:00'));
+    w.run(2 * HOUR);
+    const prompt = w.allPrompts.find((q) => q.kind === 'meal' && q.body.stage === 'plan')!;
+    const proposed = prompt.body.proposedAt!;
+
+    planMealAt(w, 'breakfast', proposed + HOUR);
+    w.run(5 * MINUTE);
+
+    expect(w.state.mealEvents.find((e) => e.meal === 'breakfast')!.at).toBe(proposed + HOUR);
+    // And the before-meal tablet follows it.
+    const dose = w.state.liveDoses.find((d) => d.medId === w.med('stomach capsule').id);
+    expect(dose!.effectiveDueAt).toBe(proposed + HOUR - 30 * MINUTE);
   });
 });
 
@@ -174,12 +225,17 @@ describe('when the plan does not survive contact with the day', () => {
       source: 'skipped', plannedAt: null, askedAt: null,
     });
     w.state.patient.nextActionAt = w.now;
+    const skippedAt = w.now;
     w.run(2 * HOUR);
 
-    // No dose messages for a meal that is not happening.
+    // Nothing further is asked about a meal that is not happening. Anything prompted
+    // before she said so is fair -- the bot did not know yet.
     const flexiPrompts = w.sent.filter((s) =>
+      s.at > skippedAt &&
       s.doseIds.some((id) => w.allDoses.find((d) => d.id === id)?.medId === w.med('flexi').id));
-    expect(flexiPrompts.length).toBe(0);
+    expect(flexiPrompts.length, 'kept asking about a meal she said she was skipping').toBe(0);
+    // And the dose is resolved rather than left hanging all day.
+    expect(w.state.liveDoses.filter((d) => d.medId === w.med('flexi').id).length).toBe(0);
   });
 
   it('does not bunch the next meal question up against the last one', () => {
@@ -199,5 +255,32 @@ describe('when the plan does not survive contact with the day', () => {
       // At least three hours after breakfast, not straight afterwards.
       expect(lunchAsk.at - at(0, '09:15')).toBeGreaterThanOrEqual(3 * HOUR);
     }
+  });
+});
+
+describe('the proposal is always actionable', () => {
+  it('never proposes a time that has already gone', () => {
+    // Woken hours ago with nothing said: the assumed breakfast time is long past, but
+    // proposing it would leave no room for the tablet due before it.
+    const w = world(at(0, '06:00'));
+    w.now = at(0, '11:00');
+    w.state.patient.nextActionAt = w.now;
+    w.run(10 * MINUTE);
+
+    const prompt = w.allPrompts.find((q) => q.kind === 'meal' && q.body.stage === 'plan');
+    expect(prompt, 'never asked').toBeDefined();
+    expect(prompt!.body.proposedAt!, 'proposed a time in the past').toBeGreaterThan(at(0, '11:00'));
+    // And with enough lead for the half-hour-before tablet.
+    expect(prompt!.body.proposedAt! - prompt!.createdAt).toBeGreaterThanOrEqual(30 * MINUTE);
+  });
+
+  it('still presumes the meal happened if nothing is ever answered', () => {
+    const w = world(at(0, '08:00'));
+    w.run(6 * HOUR);
+    const event = w.state.mealEvents.find((e) => e.meal === 'breakfast');
+    expect(event, 'a meal nobody answered about vanished entirely').toBeDefined();
+    expect(event!.source).toBe('presumed');
+    // And the after-meal tablet was not stranded waiting for an answer.
+    expect(w.state.liveDoses.filter((d) => d.medId === w.med('flexi').id).length).toBe(1);
   });
 });

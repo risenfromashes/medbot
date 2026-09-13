@@ -149,18 +149,24 @@ you confirm you have eaten, that window has gone.
 
 So each meal runs through three states:
 
-1. **Asked.** A while after you wake -- measured from waking, not from the clock, and never
-   bunched against the previous meal -- it asks *when* you are having breakfast. Buttons
-   for "in 30 minutes", "in an hour", "in two hours", "eating now", "skipping it", or
-   `/eating breakfast in 1h`.
-2. **Planned.** Your answer fixes a time. Anything due before the meal is scheduled from
+1. **Proposed.** An assumed time is derived from when you woke -- not from the clock, and
+   never bunched against the previous meal -- and the bot proposes it: *"Having breakfast
+   around 09:15?"* One tap to agree, one to push it back half an hour, an hour, two.
+
+   The question arrives far enough ahead of that time for the before-meal tablet to still
+   have its half hour; the lead widens automatically to cover the longest before-meal
+   offset of anything tied to that meal. And it never proposes a time that has already
+   gone, because that leaves no room to act on the answer.
+2. **Planned.** Your answer fixes the time. Anything due before the meal is scheduled from
    it, and its reminder says why: *"you said breakfast in about 30 minutes — this one goes
    before it."* Change your mind and the tablets move with you.
 3. **Confirmed.** At the planned time it asks whether you are eating now. That releases
    anything due after the meal.
 
-Every step has a fallback. A meal planned but never confirmed is presumed to have happened
-after a couple of hours, so an after-meal tablet is never stranded waiting for an answer
+Every step has a fallback. A meal nobody answers about is presumed to have happened a
+couple of hours after the *originally* assumed time -- not after the proposal, which keeps
+sliding forward, or it would never be presumed at all and every after-meal tablet would
+wait for ever. A meal planned but never confirmed is presumed the same way, so an after-meal tablet is never stranded waiting for an answer
 that is not coming. A meal you say you are skipping resolves whatever depended on it rather
 than leaving it hanging, and the medicine returns tomorrow.
 
