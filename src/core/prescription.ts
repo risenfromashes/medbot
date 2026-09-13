@@ -62,6 +62,8 @@ export interface NormalizedPrescription {
     eveningPollAt?: string;
     presumedSleepAt?: string;
     digestAt?: string;
+    /** The shortest stretch the bot will treat as a night's sleep. */
+    minSleepMs?: number;
   };
   meals: NormalizedMeal[];
   meds: NormalizedMed[];
@@ -248,11 +250,13 @@ export function parsePrescription(raw: unknown, opts: { now: number } = { now: D
   const evening = c.wall('day', 'evening_poll_at', dayRaw['evening_poll_at'], null);
   const presumedSleep = c.wall('day', 'presumed_sleep_at', dayRaw['presumed_sleep_at'], null);
   const digest = c.wall('day', 'digest_at', dayRaw['digest_at'], null);
+  const minSleep = c.dur('day', 'min_sleep', dayRaw['min_sleep'], null);
   if (morning !== null) day.morningPollAt = morning;
   if (presumedWake !== null) day.presumedWakeAt = presumedWake;
   if (evening !== null) day.eveningPollAt = evening;
   if (presumedSleep !== null) day.presumedSleepAt = presumedSleep;
   if (digest !== null) day.digestAt = digest;
+  if (minSleep !== null) day.minSleepMs = minSleep;
 
   if (morning !== null && presumedWake !== null && presumedWake < morning) {
     c.err('day', '"presumed_wake_at" must be later than "morning_poll_at"');

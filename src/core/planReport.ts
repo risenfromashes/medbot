@@ -11,6 +11,7 @@
 import type { Action, Medicine, PatientState } from './domain.js';
 import { courseComplete } from './planSchedule.js';
 import type { LocalDay, Zone } from './tz.js';
+import { esc } from './html.js';
 import { HOUR, fmtDuration } from './tz.js';
 
 /** How often the watchdog bothers to look. */
@@ -101,7 +102,7 @@ function digestText(state: PatientState, z: Zone, today: LocalDay): string {
     taken += c.taken;
     missed += c.missed;
     detail.push(
-      `• ${med.name} — ${c.taken} taken${c.missed > 0 ? `, <b>${c.missed} missed</b>` : ''}`,
+      `• ${esc(med.name)} — ${c.taken} taken${c.missed > 0 ? `, <b>${c.missed} missed</b>` : ''}`,
     );
   }
 
@@ -117,7 +118,7 @@ function digestText(state: PatientState, z: Zone, today: LocalDay): string {
     .map((m) => {
       const day = z.diffLocalDays(z.localDay(m.startedAt!), today) + 1;
       const left = (m.courseDays ?? 0) - day;
-      return `• ${m.name} — day ${day} of ${m.courseDays}${left <= 1 ? ' <i>(nearly done)</i>' : ''}`;
+      return `• ${esc(m.name)} — day ${day} of ${m.courseDays}${left <= 1 ? ' <i>(nearly done)</i>' : ''}`;
     });
   if (courses.length > 0) lines.push('', '<b>Courses</b>', ...courses);
 

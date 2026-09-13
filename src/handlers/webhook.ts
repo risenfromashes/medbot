@@ -73,6 +73,17 @@ async function process(env: Env, db: Db, update: TgUpdate, now: number): Promise
     await handleCommand(ctx, msg);
   } catch (e) {
     await db.audit(null, 'webhook_error', 'system', { error: e instanceof Error ? e.message : String(e) }, now);
+    // Say so. A bug that eats the reply leaves someone staring at a message that went
+    // nowhere, with no way to tell a broken bot from a slow one -- and the honest guess,
+    // that it worked, is the dangerous one for a medication reminder.
+    const chatId = update.message?.chat.id ?? update.callback_query?.message?.chat.id;
+    if (chatId !== undefined) {
+      await tg.sendMessage(
+        chatId,
+        "⚠️ Something went wrong at my end and I couldn't finish that. Nothing has changed.\n\n" +
+          'Try again, or send /status to see where things stand.',
+      ).catch(() => undefined);
+    }
   }
 }
 

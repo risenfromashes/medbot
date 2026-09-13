@@ -9,7 +9,7 @@
 import type { Dose, Medicine, Prompt } from './domain.js';
 import type { InlineButton } from '../io/telegram.js';
 import { encodeCallback } from './callbackCodec.js';
-import { esc } from '../io/telegram.js';
+import { esc } from './html.js';
 import type { Zone } from './tz.js';
 import { HOUR, MINUTE, fmtDuration, fmtTime12 } from './tz.js';
 

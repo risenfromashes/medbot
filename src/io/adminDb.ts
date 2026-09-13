@@ -501,6 +501,7 @@ function rowToPatientLite(r: Row): Patient {
     presumedSleepAt: str(r['presumed_sleep_at']),
     quietStart: strOrNull(r['quiet_start']),
     quietEnd: strOrNull(r['quiet_end']),
+    minSleepMs: numOrNull(r['min_sleep_ms']) ?? 4 * 3_600_000,
     wakeState: str(r['wake_state']) as Patient['wakeState'],
     wakeConfidence: str(r['wake_confidence']) as Patient['wakeConfidence'],
     wakeStateSince: num(r['wake_state_since']),

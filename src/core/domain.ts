@@ -240,6 +240,15 @@ export interface Patient {
   presumedSleepAt: string;
   quietStart: string | null;
   quietEnd: string | null;
+  /**
+   * The shortest stretch that counts as a night's sleep.
+   *
+   * Nothing the clock says can declare the patient awake before this has elapsed, so
+   * going to bed at five in the morning does not get you a 06:30 "are you awake?" and a
+   * 09:00 start to the day. An explicit /awake always wins -- the person is the
+   * authority; this only governs what the bot is allowed to assume.
+   */
+  minSleepMs: number;
   wakeState: WakeState;
   wakeConfidence: WakeConfidence;
   wakeStateSince: number;

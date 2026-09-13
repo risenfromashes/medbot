@@ -46,6 +46,7 @@ export const COMMANDS = [
   { command: 'tz', description: 'Set the timezone, e.g. /tz Asia/Dhaka' },
   { command: 'invite', description: 'Get a code so someone can back you up' },
   { command: 'patients', description: 'Who this chat is linked to' },
+  { command: 'name', description: 'Change what I call you, e.g. /name Ayesha' },
   { command: 'settings', description: 'Your day, timezone and reminder settings' },
   { command: 'caregiver', description: 'Become someone\'s backup, with their code' },
   { command: 'leave', description: 'Stop being someone\'s backup' },
@@ -153,6 +154,10 @@ export async function handleCommand(ctx: CmdCtx, msg: TgIncomingMessage): Promis
     case 'tz': case 'timezone': return cmdTz(ctx, args);
     case 'patients': return cmdPatients(ctx);
     case 'settings': return cmdSettings(ctx, args);
+    // Buried inside /settings, nobody found it: one household went a fortnight with the
+    // bot calling someone "Member", which is what Telegram hands over when a chat has no
+    // first name on it.
+    case 'name': case 'callme': case 'rename': return cmdSettings(ctx, `name ${args}`);
     case 'invite': return cmdInvite(ctx);
     case 'caregiver': case 'watch': return cmdCaregiver(ctx, args);
     case 'leave': case 'unwatch': return cmdLeave(ctx, args);
@@ -243,7 +248,8 @@ async function cmdStart(ctx: CmdCtx, args: string): Promise<void> {
       "Don't have the JSON? Send <code>/prompt</code> and I'll give you the text to paste into any " +
       'AI chatbot along with a photo of your prescription. I check the result carefully before ' +
       'anything takes effect.\n\n' +
-      "<i>If someone should be told when you miss a dose, <code>/invite</code> gives them a code.</i>",
+      `<i>If I've got your name wrong, <code>/name Ayesha</code> fixes it. And if someone ` +
+      `should be told when you miss a dose, <code>/invite</code> gives them a code.</i>`,
   );
 }
 
@@ -437,7 +443,16 @@ async function cmdCaregiver(ctx: CmdCtx, args: string): Promise<void> {
 
 // --- day state -----------------------------------------------------------
 
-async function cmdWake(ctx: CmdCtx, kind: 'wake' | 'sleep', args: string): Promise<void> {
+/**
+ * The shortest stretch of being up that counts as a day.
+ *
+ * /sleep ends the day; a doze on the sofa does not. Without a floor, "up" and "in bed"
+ * ping-pong: the day restarts, medicines re-anchor on a wake that was really a nap, and
+ * the schedule walks. Naps need no command at all -- the bot simply carries on.
+ */
+const MIN_AWAKE = 4 * HOUR;
+
+async function cmdWake(ctx: CmdCtx, kind: 'wake' | 'sleep', args: string, force = false): Promise<void> {
   const ap = await activePatient(ctx);
   if (ap === null) return needsSetup(ctx);
   const { patient, z } = ap;
@@ -458,6 +473,24 @@ async function cmdWake(ctx: CmdCtx, kind: 'wake' | 'sleep', args: string): Promi
     suffix = ` (recorded as ${z.fmtTime12(at)})`;
   }
 
+  if (kind === 'sleep' && !force) {
+    if (patient.wakeState === 'asleep') {
+      await reply(ctx, "🌙 You're already down for the night as far as I'm concerned — sleep well.");
+      return;
+    }
+    const upFor = at - patient.wakeStateSince;
+    if (upFor < MIN_AWAKE) {
+      await reply(
+        ctx,
+        `You've only been up ${esc(fmtDuration(Math.max(upFor, 0)))}, so I'll leave the day running.\n\n` +
+          `Nap as much as you like — you don't need to tell me, and I'll keep the reminders coming. ` +
+          `<b>/sleep</b> is for the end of the day, when you're turning in for the night.`,
+        [[{ text: "🌙 No, I'm turning in for the night", callback_data: encodeCallback({ a: 'sleepAnyway' }) }]],
+      );
+      return;
+    }
+  }
+
   await ctx.db.setWake(patient.id, kind === 'wake' ? 'awake' : 'asleep', at, z.localDay(at), 'command', ctx.chatId);
   for (const q of await ctx.db.openPromptsFor(patient.id)) {
     if (q.kind === kind) {
@@ -466,12 +499,96 @@ async function cmdWake(ctx: CmdCtx, kind: 'wake' | 'sleep', args: string): Promi
     }
   }
 
-  await reply(
-    ctx,
-    kind === 'wake'
-      ? `☀️ Good morning${suffix}. Starting today's schedule — I'll let you know when something is due.`
-      : `🌙 Sleep well${suffix}. I'll keep quiet until morning.`,
+  if (kind === 'wake') {
+    await reply(ctx, `☀️ Good morning${suffix}. Starting today's schedule — I'll let you know when something is due.`);
+    return;
+  }
+
+  await sayGoodnight(ctx, ap, suffix);
+}
+
+/**
+ * Going to bed, with whatever is still outstanding named rather than left to rot.
+ *
+ * Sleep does not clear the day by itself: an unanswered dose stays unanswered, parks
+ * overnight and comes back in the morning. But saying nothing about it is how a person
+ * ends up with three days of "missed" in their log that they actually took. So they get
+ * told, and given the three honest answers.
+ */
+export function bedtimeButtons(): Array<Array<{ text: string; callback_data: string }>> {
+  return [
+    [{ text: '✅ I took them', callback_data: encodeCallback({ a: 'bedtime', choice: 'took' }) }],
+    [{ text: "⏭ I'm skipping them", callback_data: encodeCallback({ a: 'bedtime', choice: 'skip' }) }],
+    [{ text: '🌙 Leave them for morning', callback_data: encodeCallback({ a: 'bedtime', choice: 'leave' }) }],
+  ];
+}
+
+export async function goodnightMessage(ctx: CmdCtx, patientId: number, suffix = ''): Promise<string> {
+  const patient = await ctx.db.getPatient(patientId);
+  const z = zoneFor(patient?.tz ?? 'UTC');
+  const outstanding = await ctx.db.outstandingDoses(patientId);
+  if (outstanding.length === 0) {
+    return `🌙 Sleep well${suffix}. Everything's done for today — I'll keep quiet until morning.`;
+  }
+  const names = outstanding.map((d) => `• ${esc(d.label)} — <i>due ${z.fmtTime12(d.dose.effectiveDueAt)}</i>`);
+  return (
+    `🌙 Sleep well${suffix}. I'll keep quiet until morning.\n\n` +
+    `<b>Still outstanding today</b>\n${names.join('\n')}\n\n` +
+    `What should I do with ${outstanding.length === 1 ? 'it' : 'them'}?`
   );
+}
+
+/** The "yes, I really am going to bed" button, bypassing the too-soon guard. */
+export async function forceSleep(ctx: CmdCtx): Promise<void> {
+  await cmdWake(ctx, 'sleep', '', true);
+}
+
+async function sayGoodnight(
+  ctx: CmdCtx,
+  ap: { patient: Patient; z: Zone },
+  suffix = '',
+): Promise<void> {
+  const outstanding = await ctx.db.outstandingDoses(ap.patient.id);
+  const text = await goodnightMessage(ctx, ap.patient.id, suffix);
+  await reply(ctx, text, outstanding.length === 0 ? undefined : bedtimeButtons());
+}
+
+/** The answer to that question. Exported because the button lands in the callback handler. */
+export async function resolveBedtime(ctx: CmdCtx, choice: 'took' | 'skip' | 'leave'): Promise<string> {
+  const ap = await activePatient(ctx);
+  if (ap === null) return 'I need to know who you are first — send /start.';
+  const { patient, z } = ap;
+
+  if (choice === 'leave') {
+    return (
+      "🌙 Left as they are. They'll be waiting when you get up, re-timed to whenever that " +
+      'actually is — nothing is logged as missed in the meantime.'
+    );
+  }
+
+  const outstanding = await ctx.db.outstandingDoses(patient.id);
+  if (outstanding.length === 0) return 'Nothing outstanding — all dealt with.';
+
+  const status = choice === 'took' ? 'taken' : 'skipped';
+  const done: string[] = [];
+  for (const item of outstanding) {
+    const res = await ctx.db.tryResolveDose(item.dose.id, ctx.chatId, status, ctx.now, ctx.now, 'bedtime');
+    if (res.won) done.push(item.label);
+    if (item.dose.promptId !== null) {
+      await ctx.db.closePrompt(item.dose.promptId, 'resolved', ctx.now);
+      await clearPromptMessages({ db: ctx.db, tg: ctx.tg, z, now: ctx.now }, item.dose.promptId);
+    }
+  }
+  if (done.length === 0) return 'Those were already dealt with — nothing more to do.';
+
+  return choice === 'took'
+    ? `✅ Logged as taken: ${done.map(esc).join(', ')}.\n\n` +
+        `If any of those were earlier than now, <code>/took ${esc(done[0] ?? 'name')} 9pm</code> corrects the time. ` +
+        `<code>/undo</code> puts it all back.`
+    : `⏭ Logged as skipped: ${done.map(esc).join(', ')}.\n\n` +
+        `⚠️ <b>These count as doses you did not take</b> — they'll show in /log, and tomorrow starts ` +
+        `fresh from whenever you get up rather than carrying on from today. ` +
+        `<code>/undo</code> puts it back if that wasn't what you meant.`;
 }
 
 /**
@@ -520,7 +637,7 @@ async function cmdEating(ctx: CmdCtx, args: string): Promise<void> {
     return;
   }
 
-  await ctx.db.recordMeal(patient.id, meal, z.localDay(ctx.now), plannedAt, 'planned', plannedAt);
+  await ctx.db.recordMeal(patient.id, meal, z.localDay(ctx.now), plannedAt, 'planned', plannedAt, ctx.chatId);
   await ctx.db.wakeNow(patient.id, ctx.now);
   for (const q of await ctx.db.openPromptsFor(patient.id)) {
     if (q.kind === 'meal' && q.body.meal === meal) {
@@ -547,7 +664,7 @@ async function cmdAte(ctx: CmdCtx, args: string): Promise<void> {
     return;
   }
   const at = time?.at ?? ctx.now;
-  await ctx.db.recordMeal(patient.id, meal, z.localDay(at), at, 'confirmed');
+  await ctx.db.recordMeal(patient.id, meal, z.localDay(at), at, 'confirmed', null, ctx.chatId);
   await ctx.db.wakeNow(patient.id, ctx.now);
   for (const q of await ctx.db.openPromptsFor(patient.id)) {
     if (q.kind === 'meal' && q.body.meal === meal) {
@@ -591,7 +708,7 @@ async function cmdTook(ctx: CmdCtx, args: string): Promise<void> {
   } else {
     const matches = matchMed(meds, head);
     if (matches.length === 0) {
-      await reply(ctx, `No medicine matching "${esc(head)}". /meds lists them.`);
+      await reply(ctx, `No medicine matching "${esc(head)}".\n\n${await medicineList(ctx, patient.id)}`);
       return;
     }
     if (matches.length > 1) {
@@ -724,27 +841,63 @@ async function cmdSnooze(ctx: CmdCtx, args: string): Promise<void> {
 }
 
 async function cmdUndo(ctx: CmdCtx): Promise<void> {
+  const links = await ctx.db.linksForChat(ctx.chatId);
+  if (links.length === 0) return needsSetup(ctx);
+
+  const done = await ctx.db.undoLast(links.map((l) => l.patientId), ctx.now);
+  if (done === null) {
+    await reply(
+      ctx,
+      "Nothing to undo — I haven't recorded a decision in the last day.\n\n" +
+        'To correct something older, just state the truth and I\'ll fix the schedule:\n' +
+        '• <code>/took drops 5pm</code> — even if I already logged it as missed\n' +
+        '• <code>/skip drops</code> — if you decided not to take it\n' +
+        '• <code>/awake 6:30am</code> — if I started the day at the wrong time',
+    );
+    return;
+  }
+
+  const patient = links[0] === undefined ? null : await ctx.db.getPatient(links[0].patientId);
+  const z = zoneFor(patient?.tz ?? 'UTC');
   await reply(
     ctx,
-    'To correct something, just state the truth and I\'ll fix the schedule:\n' +
-      '• <code>/took drops 5pm</code> — even if I already logged it as missed\n' +
-      '• <code>/skip drops</code> — if you decided not to take it\n' +
-      '• <code>/awake 6:30am</code> — if I started the day at the wrong time',
+    `↩️ Undone — <b>${esc(done.medName)}</b> ${esc(done.status === 'undone' ? 'is back as it was' : `is no longer recorded as ${done.status}`)} ` +
+      `(logged ${z.fmtTime12(done.at)}).\n\n` +
+      "I've put the schedule back to where it was. Send /undo again to step back further.",
   );
 }
 
 // --- information ---------------------------------------------------------
 
+/**
+ * Status for everyone this chat is responsible for.
+ *
+ * A caregiver's whole job is knowing whether someone else is all right, and making them
+ * type a name to find out -- or worse, guess at the spelling -- is the wrong way round.
+ * A bare /status covers themselves and everyone they back up, in that order.
+ */
 async function cmdStatus(ctx: CmdCtx, args = ''): Promise<void> {
-  // Your own by default; name someone you back up to see theirs.
+  if (args.trim() === '') {
+    const links = await ctx.db.linksForChat(ctx.chatId);
+    if (links.length === 0) return needsSetup(ctx);
+    const ordered = [...links].sort((a, b) => (a.role === 'patient' ? -1 : 0) - (b.role === 'patient' ? -1 : 0));
+    for (const link of ordered) {
+      const p = await ctx.db.getPatient(link.patientId);
+      if (p === null) continue;
+      await statusFor(ctx, { patient: p, z: zoneFor(p.tz), isSelf: link.role === 'patient' });
+    }
+    return;
+  }
+
   const view = await resolveViewable(ctx, args);
   if (view === null) {
-    if (args.trim() !== '') {
-      await reply(ctx, `You're not linked to anyone called "${esc(args.trim())}". /patients lists who you are.`);
-      return;
-    }
-    return needsSetup(ctx);
+    await reply(ctx, `You're not linked to anyone called "${esc(args.trim())}". /patients lists who you are.`);
+    return;
   }
+  await statusFor(ctx, view);
+}
+
+async function statusFor(ctx: CmdCtx, view: { patient: Patient; z: Zone; isSelf: boolean }): Promise<void> {
   const { patient, z } = view;
   const meds = await ctx.db.medsFor(patient.id);
   const today = z.localDay(ctx.now);
@@ -901,7 +1054,12 @@ async function cmdMedStatus(ctx: CmdCtx, args: string, status: Medicine['status'
   const meds = await ctx.db.medsFor(ap.patient.id, true);
   const matches = matchMed(meds, args);
   if (matches.length !== 1) {
-    await reply(ctx, matches.length === 0 ? `No medicine matching "${esc(args)}". /meds lists them.` : 'Which one? /meds lists them.');
+    await reply(
+      ctx,
+      matches.length === 0
+        ? `No medicine matching "${esc(args)}".\n\n${await medicineList(ctx, ap.patient.id)}`
+        : `Which one?\n\n${await medicineList(ctx, ap.patient.id)}`,
+    );
     return;
   }
   const med = matches[0]!;
@@ -1060,12 +1218,25 @@ async function ingestPrescription(
     : '';
   await reply(
     ctx,
-    `<b>Here's what would change</b>\n\n${diff}${warnings}\n\n<i>Nothing has been applied yet.</i>`,
+    `<b>Here's what would change</b>\n\n${diff}${warnings}` +
+      `${presc.tz === null ? await timezoneWarning(ctx, patientId) : ''}\n\n<i>Nothing has been applied yet.</i>`,
     [[
       { text: '✅ Apply', callback_data: encodeCallback({ a: 'confirmImport', versionId }) },
       { text: '✖️ Cancel', callback_data: encodeCallback({ a: 'cancelImport', versionId }) },
     ]],
   );
+}
+
+/**
+ * The medicines this patient is on, as a list you can copy a name out of.
+ *
+ * "No medicine matching X. /meds lists them." makes someone type a second command to
+ * find out what they were supposed to have typed the first time. Just show them.
+ */
+async function medicineList(ctx: CmdCtx, patientId: number): Promise<string> {
+  const meds = (await ctx.db.medsFor(patientId)).filter((m) => m.status === 'active');
+  if (meds.length === 0) return 'You have no medicines loaded — send /import, or /prompt for the format.';
+  return `<b>You're on:</b>\n${meds.map((m) => `• ${esc(m.name)} — <code>/took ${esc(m.medKey)}</code>`).join('\n')}`;
 }
 
 /** A paste that arrived in pieces, if one is still in progress. */
@@ -1131,7 +1302,26 @@ export async function applyImport(ctx: CmdCtx, versionId: number): Promise<strin
 
   return (
     `✅ <b>Prescription applied</b>${parts.length > 0 ? ` — ${parts.join('; ')}.` : '.'}\n\n` +
-    "I'll start reminding you from the next dose. /meds shows everything, /status shows what's next."
+    "I'll start reminding you from the next dose. /meds shows everything, /status shows what's next." +
+    (await timezoneWarning(ctx, version.patientId))
+  );
+}
+
+/**
+ * Nothing else in the bot is wrong by six hours, silently.
+ *
+ * A patient who never sent /tz, with a prescription whose chatbot did not fill in a
+ * timezone, gets a schedule built on UTC: their morning poll fires in the middle of the
+ * night and their eye drops are due while they are asleep. Every time is plausible and
+ * every time is wrong, which is the hardest kind of wrong to notice.
+ */
+async function timezoneWarning(ctx: CmdCtx, patientId: number): Promise<string> {
+  const patient = await ctx.db.getPatient(patientId);
+  if (patient === null || patient.tz !== 'UTC') return '';
+  const z = zoneFor('UTC');
+  return (
+    `\n\n⚠️ <b>I still think you're on UTC</b> — it's ${z.fmtTime12(ctx.now)} as far as I know. ` +
+    `Send <code>/tz Asia/Dhaka</code> (or wherever you are) or every reminder will be hours out.`
   );
 }
 
@@ -1547,10 +1737,10 @@ async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
     digest: { column: 'digest_at', label: 'send the daily summary' },
   };
 
-  if (parts.length >= 2 && ['name', 'callme'].includes(parts[0]!.toLowerCase())) {
+  if (parts.length >= 1 && ['name', 'callme'].includes(parts[0]!.toLowerCase())) {
     const newName = parts.slice(1).join(' ').trim().slice(0, 60);
     if (newName === '') {
-      await reply(ctx, 'What should I call you? e.g. <code>/settings name Ayesha</code>');
+      await reply(ctx, `What should I call you? Send <code>/name Ayesha</code>.`);
       return;
     }
     await ctx.env.MEDBOT_DB
@@ -1562,6 +1752,25 @@ async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
       .bind(ctx.chatId, newName)
       .run();
     await reply(ctx, `⚙️ I'll call you <b>${esc(newName)}</b> from now on.`);
+    return;
+  }
+
+  if (parts.length >= 2 && ['minsleep', 'min_sleep', 'nightlength'].includes(parts[0]!.toLowerCase())) {
+    const ms = parseDuration(parts.slice(1).join(' '));
+    if (ms === null || ms < 15 * 60_000 || ms > 12 * 60 * 60_000) {
+      await reply(ctx, 'Give me a length between 15 minutes and 12 hours, e.g. <code>/settings minsleep 4h</code>.');
+      return;
+    }
+    await ctx.env.MEDBOT_DB
+      .prepare('UPDATE patients SET min_sleep_ms = ?2, next_action_at = ?3 WHERE id = ?1')
+      .bind(patient.id, ms, ctx.now)
+      .run();
+    await ctx.db.audit(patient.id, 'setting_changed', String(ctx.chatId), { key: 'min_sleep', value: ms }, ctx.now);
+    await reply(
+      ctx,
+      `⚙️ Once you're in bed I'll leave you alone for at least <b>${esc(fmtDuration(ms))}</b>, ` +
+        `whatever the clock says. Send /awake any time to start the day early.`,
+    );
     return;
   }
 
@@ -1598,13 +1807,15 @@ async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
       `Assume awake   <code>${esc(patient.presumedWakeAt)}</code>\n` +
       `Evening ask    <code>${esc(patient.eveningPollAt)}</code>\n` +
       `Assume asleep  <code>${esc(patient.presumedSleepAt)}</code>\n` +
+      `Shortest night <code>${esc(fmtDuration(patient.minSleepMs))}</code>\n` +
       `Daily summary  <code>${esc(patient.digestAt)}</code>\n\n` +
       `<b>To change one</b>\n` +
-      `<code>/settings name Ayesha</code>\n` +
+      `<code>/name Ayesha</code>\n` +
       `<code>/settings morning 06:30</code>\n` +
       `<code>/settings wake 09:00</code>\n` +
       `<code>/settings evening 22:30</code>\n` +
       `<code>/settings sleep 01:00</code>\n` +
+      `<code>/settings minsleep 4h</code>\n` +
       `<code>/settings digest 21:30</code>\n` +
       `<code>/tz Asia/Dhaka</code>\n\n` +
       `<i>"Assume awake" is the safety net: past that time I start reminding you even if ` +

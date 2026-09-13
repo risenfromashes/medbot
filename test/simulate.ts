@@ -53,6 +53,7 @@ export function makePatient(over: Partial<Patient> = {}): Patient {
     presumedSleepAt: '01:30',
     quietStart: null,
     quietEnd: null,
+    minSleepMs: 4 * HOUR,
     wakeState: 'asleep',
     wakeConfidence: 'presumed',
     wakeStateSince: 0,

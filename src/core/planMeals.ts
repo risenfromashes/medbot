@@ -46,6 +46,16 @@ const MIN_LEAD = 30 * MINUTE;
 /** How long after a planned time to keep asking before assuming it happened. */
 const PRESUME_AFTER_PLAN = 2 * HOUR;
 
+/** A wall time on a local day, or null if the prescription gave something unreadable. */
+function tryWall(z: Zone, day: LocalDay, wall: string | null): number | null {
+  if (wall === null || wall === '') return null;
+  try {
+    return z.wallOnDayUtc(day, wall);
+  } catch {
+    return null;
+  }
+}
+
 function ordered(defs: MealDef[]): MealDef[] {
   return [...defs].sort((a, b) => {
     const as = a.seq ?? 0;
@@ -114,10 +124,14 @@ export function planMeals(
     }
 
     // --- when is this meal assumed to be? ----------------------------------
-    // Derived from waking rather than the clock, and never bunched against the previous
-    // meal. Someone who got up at noon is not late for breakfast.
+    // The time the prescription gave, pushed later if the patient got up late, and never
+    // bunched against the previous meal. Someone who got up at noon is not late for
+    // breakfast -- but someone who got up at seven does not eat dinner at one, which is
+    // where a purely wake-relative grid lands it.
     const afterWake = def.afterWakeMs ?? defaultAfterWake(index);
+    const typicalAt = tryWall(z, today, def.typicalLocal);
     let assumedAt = wakeAnchor + afterWake;
+    if (typicalAt !== null) assumedAt = Math.max(assumedAt, typicalAt);
     if (previousMealAt !== null) {
       assumedAt = Math.max(assumedAt, previousMealAt + (def.minGapAfterPrevMs || 3 * HOUR));
     }
@@ -125,16 +139,16 @@ export function planMeals(
 
     // Two different times, and conflating them is a trap.
     //
-    // `originalAssumed` is where the day suggests this meal falls, and it is what the
-    // give-up deadline is measured against -- otherwise pushing the proposal forward on
-    // every tick would mean the meal is never presumed and every after-meal tablet waits
-    // for ever.
+    // `assumedAt` is where the day says this meal falls. Everything schedules against it
+    // and it does not move, because a time recomputed from `now` on every tick is a
+    // treadmill: a tablet due half an hour before breakfast was pushed back a minute
+    // every minute and never once became due. It is also what the give-up deadline is
+    // measured against, so the meal really does get presumed in the end.
     //
-    // `assumedAt` is what we actually propose, never in the past, because asking
+    // `proposeAt` is only what the question says, never in the past, because asking
     // "breakfast around half past?" at a quarter to is confusing and leaves no room for
     // the tablet that goes before it.
-    const originalAssumed = assumedAt;
-    if (awake && assumedAt < now + lead) assumedAt = now + lead;
+    const proposeAt = awake && assumedAt < now + lead ? now + lead : assumedAt;
 
     // --- they told us when they are eating ----------------------------------
     if (event !== undefined && event.source === 'planned') {
@@ -180,18 +194,18 @@ export function planMeals(
       if (!hasOpenMealPrompt(def.meal, 'plan')) {
         emit({
           t: 'createPrompt', id: 0, kind: 'meal', tier: 0,
-          body: { kind: 'meal', doseIds: [], meal: def.meal, stage: 'plan', proposedAt: assumedAt },
+          body: { kind: 'meal', doseIds: [], meal: def.meal, stage: 'plan', proposedAt: proposeAt },
         });
       }
       wakeUps.push(now + MEAL_POLL);
       // And once the originally assumed time is well past, fall through to presuming it
       // happened rather than leaving after-meal medicines waiting indefinitely.
-      wakeUps.push(originalAssumed + PRESUME_AFTER_PLAN);
+      wakeUps.push(assumedAt + PRESUME_AFTER_PLAN);
 
-      if (now >= originalAssumed + PRESUME_AFTER_PLAN) {
-        emit({ t: 'recordMeal', meal: def.meal, localDay: today, at: originalAssumed, source: 'presumed', plannedAt: null });
+      if (now >= assumedAt + PRESUME_AFTER_PLAN) {
+        emit({ t: 'recordMeal', meal: def.meal, localDay: today, at: assumedAt, source: 'presumed', plannedAt: null });
         emit({ t: 'closeMealPrompt', meal: def.meal });
-        meals.set(def.meal, { at: originalAssumed, confirmed: true, planned: true });
+        meals.set(def.meal, { at: assumedAt, confirmed: true, planned: true });
       }
     } else if (askAt > now) {
       wakeUps.push(askAt);

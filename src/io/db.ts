@@ -588,12 +588,229 @@ export class Db {
           .bind(dose.patientId, med.id, dose.localDay, status === 'taken' && dose.step === 0 ? 1 : 0, status === 'missed' && dose.step === 0 ? 1 : 0),
         this.d1
           .prepare('INSERT INTO audit_log (patient_id, at, kind, med_id, dose_id, actor, detail_json) VALUES (?1,?2,?3,?4,?5,?6,?7)')
-          .bind(dose.patientId, now, `dose_${status}`, med.id, doseId, String(chatId), JSON.stringify({ takenAt, src, step: dose.step })),
+          .bind(
+            dose.patientId, now, `dose_${status}`, med.id, doseId, String(chatId),
+            // The medicine's cursor before it moved. /undo restores exactly this, which
+            // is the only way to put a mistaken tap back without guessing at the schedule
+            // that produced it.
+            JSON.stringify({
+              takenAt, src, step: dose.step,
+              prevDoseStatus: dose.status,
+              prev: {
+                lastTakenAt: med.lastTakenAt,
+                lastCycleStartAt: med.lastCycleStartAt,
+                lastPlannedDueAt: med.lastPlannedDueAt,
+                nextSeq: med.nextSeq,
+                nextStep: med.nextStep,
+                dosesTaken: med.dosesTaken,
+                dosesMissed: med.dosesMissed,
+                startedAt: med.startedAt,
+              },
+            }),
+          ),
         this.d1.prepare('UPDATE patients SET next_action_at = ?2 WHERE id = ?1').bind(dose.patientId, now),
       ]);
     }
 
     return { won: true, dose, med, alreadyBy: null };
+  }
+
+  /**
+   * Everything still hanging over the patient right now: due, being nagged about, or
+   * parked for the night. What you would want listed if you were about to go to bed.
+   */
+  async outstandingDoses(patientId: number): Promise<Array<{ dose: Dose; med: Medicine; label: string }>> {
+    const res = await this.d1
+      .prepare(
+        `SELECT d.* FROM doses d
+          WHERE d.patient_id = ?1 AND d.status IN ('due','prompted','deferred')
+          ORDER BY d.effective_due_at`,
+      )
+      .bind(patientId)
+      .all<Row>();
+    const out: Array<{ dose: Dose; med: Medicine; label: string }> = [];
+    for (const row of res.results) {
+      const dose = rowToDose(row);
+      const medRow = await this.d1.prepare('SELECT * FROM medications WHERE id = ?1').bind(dose.medId).first<Row>();
+      if (medRow === null) continue;
+      const med = rowToMed(medRow);
+      const step = med.steps[dose.step];
+      out.push({
+        dose,
+        med,
+        label: med.steps.length > 1 ? `${step?.name ?? med.name} (${dose.step + 1}/${med.steps.length})` : med.name,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Put back the last thing that was logged.
+   *
+   * A tap is one thumb-width from the wrong button, and the case that made this necessary
+   * was someone confirming two doses at five in the morning that they had not taken. The
+   * menu already offered /undo; all it did was explain how to say the right thing
+   * instead, which is no use at all when what you need is the record to stop being wrong.
+   *
+   * Restores the dose, the medicine's cursor and the day's counters from the snapshot
+   * taken when it was resolved, then lets the planner rebuild the live dose from there.
+   */
+  async undoLast(
+    patientIds: number[],
+    now: number,
+    withinMs = 24 * 3600_000,
+  ): Promise<{ medName: string; status: string; at: number } | null> {
+    if (patientIds.length === 0) return null;
+    const list = patientIds.map((n) => Math.trunc(n)).join(',');
+    // A handful of candidates, not just the newest. An entry whose dose has since been
+    // deleted -- a re-import, a reset -- must not block undo for everything behind it,
+    // which is exactly what "the last thing I did is unreachable" feels like from the
+    // other end.
+    const candidates = await this.d1
+      .prepare(
+        `SELECT a.* FROM audit_log a
+          WHERE a.patient_id IN (${list})
+            AND a.kind IN ('dose_taken','dose_skipped','dose_missed','day_state_set','meal_set')
+            AND a.at >= ?1
+            AND NOT EXISTS (
+              SELECT 1 FROM audit_log u
+               WHERE u.kind = 'undone' AND u.dose_id = a.id AND u.at >= a.at)
+          ORDER BY a.at DESC, a.id DESC LIMIT 20`,
+      )
+      .bind(now - withinMs)
+      .all<Row>();
+
+    for (const candidate of candidates.results) {
+      const done = await this.undoOne(candidate, now);
+      if (done !== null) return done;
+    }
+    return null;
+  }
+
+  private async undoOne(row: Row, now: number): Promise<{ medName: string; status: string; at: number } | null> {
+
+    // Every undone entry is marked by its own id, so stepping back twice steps back two
+    // decisions rather than bouncing off the same one.
+    const markUndone = (patientId: number): D1PreparedStatement =>
+      this.d1
+        .prepare('INSERT INTO audit_log (patient_id, at, kind, med_id, dose_id, actor, detail_json) VALUES (?1,?2,?3,NULL,?4,?5,?6)')
+        .bind(patientId, now, 'undone', num(row['id']), 'undo', JSON.stringify({ was: str(row['kind']) }));
+
+    if (str(row['kind']) === 'day_state_set') {
+      const patientId = numOrNull(row['patient_id']);
+      if (patientId === null) return null;
+      let d: { to?: string; prev?: Record<string, unknown> } = {};
+      try {
+        d = JSON.parse(str(row['detail_json'] ?? '{}')) as typeof d;
+      } catch {
+        return null;
+      }
+      const prev = d.prev;
+      if (prev === undefined) return null;
+      await this.d1.batch([
+        this.d1
+          .prepare(
+            `UPDATE patients SET wake_state = ?2, wake_confidence = ?3, wake_state_since = ?4,
+               last_wake_at = ?5, last_sleep_at = ?6, next_action_at = ?7 WHERE id = ?1`,
+          )
+          .bind(
+            patientId, String(prev['wakeState'] ?? 'asleep'), String(prev['wakeConfidence'] ?? 'presumed'),
+            Number(prev['wakeStateSince'] ?? now), (prev['lastWakeAt'] ?? null) as number | null,
+            (prev['lastSleepAt'] ?? null) as number | null, now,
+          ),
+        markUndone(patientId),
+      ]);
+      return { medName: d.to === 'awake' ? 'starting the day' : 'ending the day', status: 'undone', at: num(row['at']) };
+    }
+
+    if (str(row['kind']) === 'meal_set') {
+      const patientId = numOrNull(row['patient_id']);
+      if (patientId === null) return null;
+      let d: { meal?: string; localDay?: string; prev?: Record<string, unknown> | null } = {};
+      try {
+        d = JSON.parse(str(row['detail_json'] ?? '{}')) as typeof d;
+      } catch {
+        return null;
+      }
+      if (d.meal === undefined || d.localDay === undefined) return null;
+      await this.d1.batch([
+        d.prev === null || d.prev === undefined
+          ? this.d1
+              .prepare('DELETE FROM meal_events WHERE patient_id = ?1 AND meal = ?2 AND local_day = ?3')
+              .bind(patientId, d.meal, d.localDay)
+          : this.d1
+              .prepare(
+                `UPDATE meal_events SET at = ?4, source = ?5, planned_at = ?6
+                  WHERE patient_id = ?1 AND meal = ?2 AND local_day = ?3`,
+              )
+              .bind(
+                patientId, d.meal, d.localDay, Number(d.prev['at'] ?? now),
+                String(d.prev['source'] ?? 'confirmed'), (d.prev['plannedAt'] ?? null) as number | null,
+              ),
+        this.d1.prepare('UPDATE patients SET next_action_at = ?2 WHERE id = ?1').bind(patientId, now),
+        markUndone(patientId),
+      ]);
+      return { medName: d.meal, status: 'un-recorded', at: num(row['at']) };
+    }
+
+    const doseId = numOrNull(row['dose_id']);
+    const medId = numOrNull(row['med_id']);
+    const patientId = numOrNull(row['patient_id']);
+    if (doseId === null || medId === null || patientId === null) return null;
+
+    let detail: { prevDoseStatus?: string; prev?: Record<string, number | null> } = {};
+    try {
+      detail = JSON.parse(str(row['detail_json'] ?? '{}')) as typeof detail;
+    } catch {
+      return null;
+    }
+    const prev = detail.prev;
+    if (prev === undefined) return null;
+
+    const doseRow = await this.d1.prepare('SELECT * FROM doses WHERE id = ?1').bind(doseId).first<Row>();
+    if (doseRow === null) return null; // deleted since; try the next candidate
+    const dose = rowToDose(doseRow);
+    const medRow = await this.d1.prepare('SELECT * FROM medications WHERE id = ?1').bind(medId).first<Row>();
+    const medName = medRow === null ? 'that medicine' : str(medRow['name']);
+    const kind = str(row['kind']).replace('dose_', '');
+
+    // Whatever the planner scheduled next for this medicine is downstream of the mistake,
+    // so it goes; the next tick builds the right one from the restored cursor.
+    await this.d1.batch([
+      this.d1
+        .prepare(
+          `UPDATE doses SET status = ?2, taken_at = NULL, resolved_at = NULL,
+             resolved_by_chat = NULL, resolution_src = NULL WHERE id = ?1`,
+        )
+        .bind(doseId, detail.prevDoseStatus ?? 'due'),
+      this.d1
+        .prepare(
+          `DELETE FROM doses WHERE med_id = ?1 AND id <> ?2
+             AND status IN ('scheduled','deferred','due','prompted')`,
+        )
+        .bind(medId, doseId),
+      this.d1
+        .prepare(
+          `UPDATE medications SET last_taken_at = ?2, last_cycle_start_at = ?3, last_planned_due_at = ?4,
+             next_seq = ?5, next_step = ?6, doses_taken = ?7, doses_missed = ?8, started_at = ?9
+           WHERE id = ?1`,
+        )
+        .bind(
+          medId, prev['lastTakenAt'] ?? null, prev['lastCycleStartAt'] ?? null,
+          prev['lastPlannedDueAt'] ?? null, prev['nextSeq'] ?? 1, prev['nextStep'] ?? 0,
+          prev['dosesTaken'] ?? 0, prev['dosesMissed'] ?? 0, prev['startedAt'] ?? null,
+        ),
+      this.d1
+        .prepare(
+          `UPDATE day_counters SET taken = MAX(taken - ?4, 0), missed = MAX(missed - ?5, 0)
+           WHERE patient_id = ?1 AND med_id = ?2 AND local_day = ?3`,
+        )
+        .bind(patientId, medId, dose.localDay, kind === 'taken' && dose.step === 0 ? 1 : 0, kind === 'missed' && dose.step === 0 ? 1 : 0),
+      markUndone(patientId),
+      this.d1.prepare('UPDATE patients SET next_action_at = ?2 WHERE id = ?1').bind(patientId, now),
+    ]);
+
+    return { medName, status: kind, at: num(row['at']) };
   }
 
   /**
@@ -866,16 +1083,37 @@ export class Db {
     at: number,
     source: MealEvent['source'],
     plannedAt: number | null = null,
+    byChat: number | null = null,
   ): Promise<void> {
-    await this.d1
-      .prepare(
-        `INSERT INTO meal_events (patient_id, meal, local_day, at, source, planned_at)
-         VALUES (?1,?2,?3,?4,?5,?6)
-         ON CONFLICT (patient_id, meal, local_day) DO UPDATE SET
-           at = ?4, source = ?5, planned_at = COALESCE(?6, planned_at)`,
-      )
-      .bind(patientId, meal, localDay, at, source, plannedAt)
-      .run();
+    const before = byChat === null
+      ? null
+      : await this.d1
+          .prepare('SELECT * FROM meal_events WHERE patient_id = ?1 AND meal = ?2 AND local_day = ?3')
+          .bind(patientId, meal, localDay)
+          .first<Row>();
+
+    await this.d1.batch([
+      this.d1
+        .prepare(
+          `INSERT INTO meal_events (patient_id, meal, local_day, at, source, planned_at)
+           VALUES (?1,?2,?3,?4,?5,?6)
+           ON CONFLICT (patient_id, meal, local_day) DO UPDATE SET
+             at = ?4, source = ?5, planned_at = COALESCE(?6, planned_at)`,
+        )
+        .bind(patientId, meal, localDay, at, source, plannedAt),
+      ...(byChat === null
+        ? []
+        : [
+            this.d1
+              .prepare('INSERT INTO audit_log (patient_id, at, kind, med_id, dose_id, actor, detail_json) VALUES (?1,?2,?3,NULL,NULL,?4,?5)')
+              .bind(patientId, at, 'meal_set', String(byChat), JSON.stringify({
+                meal, localDay,
+                prev: before === null
+                  ? null
+                  : { at: num(before['at']), source: str(before['source']), plannedAt: numOrNull(before['planned_at']) },
+              })),
+          ]),
+    ]);
   }
 
   async mealDefsFor(patientId: number): Promise<MealDef[]> {
@@ -899,7 +1137,36 @@ export class Db {
     source: string,
     byChat: number | null,
   ): Promise<void> {
+    // Only a person's decision is undoable. The planner presuming someone is up is not a
+    // decision anybody made, and offering to reverse it would be noise.
+    const human = source === 'command' || source === 'button';
+    const before = human
+      ? await this.d1
+          .prepare(
+            `SELECT wake_state, wake_confidence, wake_state_since, last_wake_at, last_sleep_at
+               FROM patients WHERE id = ?1`,
+          )
+          .bind(patientId)
+          .first<Row>()
+      : null;
+
     await this.d1.batch([
+      ...(before === null
+        ? []
+        : [
+            this.d1
+              .prepare('INSERT INTO audit_log (patient_id, at, kind, med_id, dose_id, actor, detail_json) VALUES (?1,?2,?3,NULL,NULL,?4,?5)')
+              .bind(patientId, at, 'day_state_set', String(byChat ?? 'system'), JSON.stringify({
+                to: state,
+                prev: {
+                  wakeState: str(before['wake_state']),
+                  wakeConfidence: str(before['wake_confidence']),
+                  wakeStateSince: num(before['wake_state_since']),
+                  lastWakeAt: numOrNull(before['last_wake_at']),
+                  lastSleepAt: numOrNull(before['last_sleep_at']),
+                },
+              })),
+          ]),
       this.d1
         .prepare(
           `UPDATE patients SET wake_state = ?2, wake_confidence = 'confirmed', wake_state_since = ?3,
@@ -1064,13 +1331,14 @@ export class Db {
              evening_poll_at = COALESCE(?6, evening_poll_at),
              presumed_sleep_at = COALESCE(?7, presumed_sleep_at),
              digest_at = COALESCE(?8, digest_at),
+             min_sleep_ms = COALESCE(?10, min_sleep_ms),
              next_action_at = ?9
            WHERE id = ?1`,
         )
         .bind(
           patientId, presc.tz, presc.patientName,
           d.morningPollAt ?? null, d.presumedWakeAt ?? null, d.eveningPollAt ?? null,
-          d.presumedSleepAt ?? null, d.digestAt ?? null, now,
+          d.presumedSleepAt ?? null, d.digestAt ?? null, now, d.minSleepMs ?? null,
         ),
       this.d1
         .prepare("UPDATE prescription_versions SET state = 'superseded' WHERE patient_id = ?1 AND state = 'active'")
@@ -1269,6 +1537,7 @@ function rowToPatient(r: Row): Patient {
     presumedSleepAt: str(r['presumed_sleep_at']),
     quietStart: strOrNull(r['quiet_start']),
     quietEnd: strOrNull(r['quiet_end']),
+    minSleepMs: numOrNull(r['min_sleep_ms']) ?? 4 * 3_600_000,
     wakeState: str(r['wake_state']) as Patient['wakeState'],
     wakeConfidence: str(r['wake_confidence']) as Patient['wakeConfidence'],
     wakeStateSince: num(r['wake_state_since']),

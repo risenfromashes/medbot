@@ -132,5 +132,8 @@ export function sanitizePatient(patient: Patient): Patient {
     wakeStateSince: finite(patient.wakeStateSince, 0),
     lastWakeAt: patient.lastWakeAt === null ? null : finite(patient.lastWakeAt, 0),
     lastSleepAt: patient.lastSleepAt === null ? null : finite(patient.lastSleepAt, 0),
+    // A zero or absurd minimum would either reinstate the bug or lock the patient out of
+    // their own day, so it is clamped to something a human night could plausibly be.
+    minSleepMs: clamp(finite(patient.minSleepMs, 4 * HOUR), 15 * 60_000, 12 * HOUR),
   };
 }

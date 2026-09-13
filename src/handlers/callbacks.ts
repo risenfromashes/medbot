@@ -16,7 +16,7 @@ import { dosesPerDayInterval } from '../core/prescription.js';
 import { Db } from '../io/db.js';
 import { Telegram, esc } from '../io/telegram.js';
 import { broadcast, clearPromptMessages } from './dispatch.js';
-import { applyImport, editMenuFor } from './commands.js';
+import { applyImport, bedtimeButtons, editMenuFor, forceSleep, goodnightMessage, resolveBedtime } from './commands.js';
 import type { CmdCtx } from './commands.js';
 import type { Env, TgCallbackQuery } from '../types.js';
 
@@ -174,12 +174,28 @@ export async function handleCallback(
       }
     }
     await ack(cb.a === 'wake' ? 'Good morning!' : 'Sleep well.');
-    await tg.sendMessage(
-      chatId,
-      cb.a === 'wake'
-        ? "☀️ Good morning. Starting today's schedule."
-        : "🌙 Goodnight — I'll keep quiet until morning.",
-    );
+    if (cb.a === 'wake') {
+      await tg.sendMessage(chatId, "☀️ Good morning. Starting today's schedule.");
+    } else {
+      await tg.sendMessage(chatId, await goodnightMessage(ctx, patient.id), {
+        replyMarkup: { inline_keyboard: bedtimeButtons() },
+      });
+    }
+    return;
+  }
+
+  // --- going to bed with things outstanding --------------------------------
+  if (cb.a === 'sleepAnyway') {
+    await ack('Goodnight.');
+    await forceSleep(ctx);
+    return;
+  }
+
+  if (cb.a === 'bedtime') {
+    await ack('Noted.');
+    const text = await resolveBedtime(ctx, cb.choice);
+    if (q.message !== undefined) await tg.editMessageText(chatId, q.message.message_id, text);
+    else await tg.sendMessage(chatId, text);
     return;
   }
 
@@ -195,7 +211,7 @@ export async function handleCallback(
     // Either "yes, around then" / "push it back" against a proposed time, or a plain
     // "in about an hour".
     const plannedAt = cb.a === 'mealAt' ? cb.at : now + cb.inMinutes * MINUTE;
-    await db.recordMeal(patient.id, cb.meal, z.localDay(now), plannedAt, 'planned', plannedAt);
+    await db.recordMeal(patient.id, cb.meal, z.localDay(now), plannedAt, 'planned', plannedAt, chatId);
     await db.wakeNow(patient.id, now);
     for (const prompt of await db.openPromptsFor(patient.id)) {
       if (prompt.kind === 'meal' && prompt.body.meal === cb.meal) {
@@ -220,7 +236,7 @@ export async function handleCallback(
       return;
     }
     const z = zoneFor(patient.tz);
-    await db.recordMeal(patient.id, cb.meal, z.localDay(now), now, cb.a === 'ate' ? 'confirmed' : 'skipped');
+    await db.recordMeal(patient.id, cb.meal, z.localDay(now), now, cb.a === 'ate' ? 'confirmed' : 'skipped', null, chatId);
     await db.wakeNow(patient.id, now);
     for (const prompt of await db.openPromptsFor(patient.id)) {
       if (prompt.kind === 'meal' && prompt.body.meal === cb.meal) {

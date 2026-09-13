@@ -4,6 +4,8 @@
  * free plan's 10ms budget.
  */
 
+import { stripTags } from '../core/html.js';
+
 export interface InlineButton {
   text: string;
   callback_data: string;
@@ -78,15 +80,37 @@ export class Telegram {
     }
   }
 
-  sendMessage(chatId: number, text: string, opts: SendOptions = {}): Promise<TgResult<TgMessage>> {
-    return this.call<TgMessage>('sendMessage', {
+  /**
+   * Send a message, and actually get it there.
+   *
+   * Telegram fails closed on both of the things that go wrong with generated text: a
+   * message over 4096 characters is rejected outright, and so is one whose HTML it cannot
+   * parse. Neither produces anything visible -- the reminder simply never arrives, which
+   * for this bot is the worst failure there is. So long text is split on a line boundary,
+   * and a parse failure is retried once as plain text.
+   */
+  async sendMessage(chatId: number, text: string, opts: SendOptions = {}): Promise<TgResult<TgMessage>> {
+    const parts = splitForTelegram(text);
+    let last: TgResult<TgMessage> = { ok: false, error: 'nothing to send' };
+    for (const [i, part] of parts.entries()) {
+      // Buttons belong on the final part, where the reader ends up.
+      const isLast = i === parts.length - 1;
+      last = await this.sendOne(chatId, part, isLast ? opts : { ...opts, replyMarkup: undefined });
+      if (!last.ok) return last;
+    }
+    return last;
+  }
+
+  private async sendOne(chatId: number, text: string, opts: SendOptions): Promise<TgResult<TgMessage>> {
+    const body = {
       chat_id: chatId,
-      text,
-      parse_mode: 'HTML',
       link_preview_options: { is_disabled: true },
       ...(opts.replyMarkup !== undefined ? { reply_markup: opts.replyMarkup } : {}),
       ...(opts.disableNotification === true ? { disable_notification: true } : {}),
-    });
+    };
+    const res = await this.call<TgMessage>('sendMessage', { ...body, text, parse_mode: 'HTML' });
+    if (res.ok || !/can't parse entities|unsupported start tag|unclosed/i.test(res.error ?? '')) return res;
+    return this.call<TgMessage>('sendMessage', { ...body, text: stripTags(text) });
   }
 
   editMessageText(
@@ -151,7 +175,31 @@ export class Telegram {
   }
 }
 
-/** Telegram truncates HTML it cannot parse, so escape anything user- or prescription-supplied. */
-export function esc(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+export { esc } from '../core/html.js';
+
+/** Telegram's hard limit, with room to spare for the "(1/2)" a split never actually adds. */
+const MAX_MESSAGE = 4000;
+
+/**
+ * Split overlong text at the last blank line, then the last newline, before the cap.
+ *
+ * Paragraph boundaries first, because that is where a tag is least likely to be left
+ * hanging across the join -- and if one is, `sendOne` still gets the message through as
+ * plain text rather than dropping it.
+ */
+export function splitForTelegram(text: string, max = MAX_MESSAGE): string[] {
+  if (text.length <= max) return [text];
+  const parts: string[] = [];
+  let rest = text;
+  while (rest.length > max) {
+    const window = rest.slice(0, max);
+    let cut = window.lastIndexOf('\n\n');
+    if (cut < max / 2) cut = window.lastIndexOf('\n');
+    if (cut < max / 2) cut = window.lastIndexOf(' ');
+    if (cut < max / 2) cut = max;
+    parts.push(rest.slice(0, cut).trimEnd());
+    rest = rest.slice(cut).replace(/^\s+/, '');
+  }
+  if (rest !== '') parts.push(rest);
+  return parts;
 }

@@ -15,6 +15,10 @@ export type Callback =
   | { a: 'takeAll'; promptId: number }
   | { a: 'wake' }
   | { a: 'sleep' }
+  /** Going to bed with doses still outstanding: what to do about them. */
+  | { a: 'bedtime'; choice: 'took' | 'skip' | 'leave' }
+  /** "Yes, I really am going to bed" -- overriding the too-soon-to-sleep guard. */
+  | { a: 'sleepAnyway' }
   | { a: 'ate'; meal: string }
   /** "I'm eating in about N minutes" -- what makes a before-meal dose schedulable. */
   | { a: 'planMeal'; meal: string; inMinutes: number }
@@ -43,6 +47,8 @@ export function encodeCallback(cb: Callback): string {
     case 'takeAll': return `A.${b36(cb.promptId)}`;
     case 'wake': return 'w';
     case 'sleep': return 'b';
+    case 'bedtime': return `B.${cb.choice}`;
+    case 'sleepAnyway': return 'Z';
     case 'ate': return `m.${cb.meal}`;
     case 'planMeal': return `p.${cb.meal}.${b36(cb.inMinutes)}`;
     // Minutes since the epoch, which is nine base-36 characters -- comfortably inside
@@ -73,6 +79,11 @@ export function decodeCallback(data: string): Callback {
     case 'A': return valid(n(1)) ? { a: 'takeAll', promptId: n(1) } : { a: 'noop' };
     case 'w': return { a: 'wake' };
     case 'b': return { a: 'sleep' };
+    case 'B':
+      return parts[1] === 'took' || parts[1] === 'skip' || parts[1] === 'leave'
+        ? { a: 'bedtime', choice: parts[1] }
+        : { a: 'noop' };
+    case 'Z': return { a: 'sleepAnyway' };
     case 'm': return parts[1] !== undefined ? { a: 'ate', meal: parts[1] } : { a: 'noop' };
     case 'p':
       return parts[1] !== undefined && Number.isFinite(n(2))

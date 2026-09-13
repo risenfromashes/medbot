@@ -22,6 +22,7 @@ import { advanceMedicine } from './advance.js';
 import type { DayFacts } from './planSchedule.js';
 import type { Zone } from './tz.js';
 import { HOUR, MINUTE } from './tz.js';
+import { esc } from './html.js';
 
 /**
  * Doses landing within this window of each other share one message. Five minutes is
@@ -107,8 +108,19 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
   // Tonight's expected sleep, and the earliest the patient is expected up again. Used to
   // keep doses inside the day they are actually having; the real wake time re-anchors
   // anything scheduled against the expected one.
-  const sleepFrom = z.nextWallAtOrAfter(p.presumedSleepAt, Math.max(wake.wakeAnchor, now - 12 * HOUR));
-  const wakeNext = z.nextWallAtOrAfter(p.morningPollAt, sleepFrom);
+  //
+  // While the patient is actually asleep, the night in question is the one they are in,
+  // not the one the clock predicts. Without this the schedule carried on planning around
+  // them -- someone who went to bed at five in the morning had the next round of drops
+  // booked for ten, in the middle of the sleep they had just declared.
+  const sleepFrom =
+    wake.state === 'asleep'
+      ? Math.min(wake.asleepSince ?? now, now)
+      : z.nextWallAtOrAfter(p.presumedSleepAt, Math.max(wake.wakeAnchor, now - 12 * HOUR));
+  const wakeNext =
+    wake.state === 'asleep'
+      ? (wake.earliestWake ?? z.nextWallAtOrAfter(p.morningPollAt, now))
+      : z.nextWallAtOrAfter(p.morningPollAt, sleepFrom);
 
   const facts: DayFacts = {
     wakeAnchor: wake.wakeAnchor,
@@ -153,8 +165,8 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
         priority: 150,
         dedupe: `phase:${rawMed.id}:${phase.index}`,
         text:
-          `📉 <b>${rawMed.name}</b> steps down today.\n\n` +
-          `From now on: ${phase.phase?.label ?? 'the next phase of the course'}.`,
+          `📉 <b>${esc(rawMed.name)}</b> steps down today.\n\n` +
+          `From now on: ${esc(phase.phase?.label ?? 'the next phase of the course')}.`,
       });
     }
 
@@ -194,7 +206,7 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
           priority: 150,
           dedupe: `course:${med.id}`,
           text:
-            `🎉 <b>${med.name} — course finished.</b>\n\n` +
+            `🎉 <b>${esc(med.name)} — course finished.</b>\n\n` +
             `${med.dosesTaken} dose${med.dosesTaken === 1 ? '' : 's'} taken` +
             `${med.dosesMissed > 0 ? `, ${med.dosesMissed} missed` : ' — every single one'}.\n\n` +
             `I'll stop reminding you about this one. Use /import if the doctor extends it.`,
@@ -292,22 +304,38 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
       }
     }
 
-    // The wake anchor may have moved since this dose was scheduled -- the patient was
-    // presumed awake at nine and actually surfaced at noon. A dose still sitting on the
-    // old anchor has to follow, or confirming "I'm up" would leave the morning's
-    // reminders stranded in the past and firing immediately.
+    // The first dose of a waking day belongs to the moment the patient actually got up,
+    // and that moment keeps moving until they say so. Two ways it goes wrong, and both
+    // have to be caught here:
+    //
+    //  - too early: presumed awake at nine, actually surfaced at noon. The morning's
+    //    reminders would otherwise sit in the past and all fire at once.
+    //  - too late: the dose was scheduled while they were asleep, so the night-skip put
+    //    it at tomorrow's wake time. Getting up early then meant no drops at all until
+    //    the following morning -- silent, and the worst failure this system has.
     if (
       med.spec.anchor === 'wake' &&
       (live.status === 'scheduled' || live.status === 'due' || live.status === 'prompted') &&
-      live.effectiveDueAt < facts.wakeAnchor &&
       (med.lastTakenAt === null || med.lastTakenAt < facts.wakeAnchor)
     ) {
-      const moved = reviveAtWake(med, facts, now);
-      if (moved > live.effectiveDueAt) {
-        emit({ t: 'retimeDose', doseId: live.id, effectiveDueAt: moved, anchorKind: 'wake' });
+      // A medicine already at its daily cap was deliberately pushed into tomorrow; that
+      // is a safety decision, not a stale anchor, and must not be undone here.
+      const capped =
+        med.maxPerDay !== null && (state.dayCounters.get(med.id)?.taken ?? 0) >= med.maxPerDay;
+      // Where the schedule wants it, floored only by the min-gap -- never by `now`, or
+      // the comparison below would drift by a minute on every tick.
+      const target = Math.max(
+        facts.wakeAnchor + med.onsetOffsetMs,
+        med.lastCycleStartAt === null ? -Infinity : med.lastCycleStartAt + med.minGapMs,
+      );
+      const desired = Math.max(target, now);
+      const stranded = live.effectiveDueAt < facts.wakeAnchor;
+      const parkedPastTheDay = live.effectiveDueAt > desired + MINUTE;
+      if (!capped && (stranded || parkedPastTheDay) && desired !== live.effectiveDueAt) {
+        emit({ t: 'retimeDose', doseId: live.id, effectiveDueAt: desired, anchorKind: 'wake' });
         // The planned time moves with it: this dose belongs to today, not to the morning
         // that never happened, and drift absorption should measure from the new grid.
-        live = { ...live, effectiveDueAt: moved, plannedDueAt: moved, anchorKind: 'wake' };
+        live = { ...live, effectiveDueAt: desired, plannedDueAt: desired, anchorKind: 'wake' };
         if (live.promptId !== null) {
           emit({ t: 'closePrompt', promptId: live.promptId, state: 'cancelled', at: now });
           live = { ...live, promptId: null, status: 'scheduled' };
@@ -317,8 +345,16 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
 
     // Sleep gating. Critical medicines pierce it; everything else parks as a single
     // deferred dose rather than accumulating one per missed interval.
+    //
+    // Anything landing before the patient is expected up parks now, not when it comes
+    // due. Going to sleep resets the day: whatever was still pending, and whatever the
+    // schedule had lined up for the small hours, waits for the morning and re-anchors on
+    // the moment they actually get up.
     if (med.awakeOnly && !med.critical) {
-      if (!facts.awake && live.effectiveDueAt <= now && live.status !== 'deferred') {
+      const duringSleep =
+        live.effectiveDueAt <= now ||
+        (typeof facts.wakeNext === 'number' && live.effectiveDueAt < facts.wakeNext);
+      if (!facts.awake && duringSleep && live.status !== 'deferred') {
         emit({ t: 'setDoseStatus', doseId: live.id, status: 'deferred' });
         settled.push({ dose: { ...live, status: 'deferred' }, med });
         continue;

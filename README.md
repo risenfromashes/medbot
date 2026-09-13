@@ -40,8 +40,11 @@ back; the tablets move with you.
 Took something and forgot to tap? Tell it when, even hours later, even if it had already
 written that dose off. It fixes the record and recalculates from the real time.
 
-In the evening it asks if you're off to bed, sends a short summary of the day, and goes
-quiet until morning.
+In the evening it asks if you're off to bed. Say yes and it tells you what's still
+outstanding — take them, skip them, or leave them for the morning — then goes quiet.
+Anything you leave comes back when you actually get up, re-timed to then. Naps need no
+announcement; `/sleep` is for the end of the day, and it won't let you end one that
+started an hour ago.
 
 ## Who it's for
 
@@ -119,13 +122,15 @@ Most of the time you just tap the buttons on the reminder. When you'd rather typ
 /ate lunch             once you've actually eaten
 /meds                  what you're on, and buttons to change it
 /log                   how you've been doing
+/undo                  take back the last thing you told me
 ```
 
 Two things worth knowing:
 
 **If you took it and forgot to tap, just say so.** `/took drops 5pm` works even if the bot
 already gave up and logged that dose as missed. It'll correct the record and recalculate
-everything from the real time.
+everything from the real time. And anything you tell it — a dose, a meal, going to bed —
+comes back off with `/undo`.
 
 **Changing things doesn't mean touching code.** `/edit drops perday 3` when the doctor cuts
 you to three times a day, `/extend drops 3d`, `/pause`, `/stop`, `/add`, or `/import` a

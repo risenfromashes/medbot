@@ -59,6 +59,37 @@ wake you.
 Then the loop starts again from whenever you happen to wake, which may be nothing like
 today.
 
+## Sleep, precisely
+
+`/sleep` ends the day. Three rules follow from that, and each one exists because the
+alternative went wrong in practice.
+
+**A night has a minimum length** (`min_sleep`, four hours by default, `/settings minsleep`).
+Nothing the clock says may declare the patient awake before it has elapsed, so going to bed
+at five in the morning does not get a 06:30 "are you awake?" and a 09:00 start to the day.
+An explicit `/awake` always wins -- the person is the authority; the minimum only governs
+what the bot is allowed to assume. A message sent within an hour of saying goodnight does
+not count as getting up either: tapping "🌙 in bed" and then sending one more line is the
+most ordinary thing a person does, and it used to start their whole day.
+
+**A day has a minimum length too.** `/sleep` within four hours of getting up is declined,
+with an explanation: naps need no announcement, the bot simply carries on. Without this,
+"up" and "in bed" ping-pong, the day restarts each time, and every wake-anchored medicine
+walks its schedule along with it. There is a button to insist, because a rule that can trap
+someone out of ending their own day is worse than the loop it prevents.
+
+**Going to bed does not clear the day.** An unanswered dose stays unanswered, parks
+overnight, and comes back in the morning re-timed to when the patient actually gets up --
+never logged as missed in the meantime. But saying nothing about it is how someone ends up
+with a week of "missed" for doses they took, so `/sleep` lists what is outstanding and
+offers the three honest answers: took them, skipping them, or leave them. Skipping is the
+only one that writes anything off, and it says so.
+
+**Every decision comes back off.** `/undo` reverses the last thing a person told the bot --
+a dose, a meal, starting or ending the day -- restoring the medicine's cursor and the day's
+counters from a snapshot taken when it was recorded, not from a guess. It steps back one
+decision at a time, over the last twenty-four hours.
+
 ---
 
 ## Scheduling
