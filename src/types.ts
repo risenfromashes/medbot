@@ -4,8 +4,6 @@ export interface Env {
   TELEGRAM_BOT_TOKEN: string;
   /** Echoed back by Telegram on every webhook call so we can verify the sender. */
   WEBHOOK_SECRET: string;
-  /** Gate so strangers who find the bot cannot use your deployment. */
-  JOIN_CODE?: string;
   /** Usually discovered from the first request; set explicitly to override. */
   WEBHOOK_URL?: string;
 }

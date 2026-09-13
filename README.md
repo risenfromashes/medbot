@@ -80,12 +80,12 @@ npx wrangler d1 migrations apply MEDBOT_DB --remote
 
 npx wrangler secret put TELEGRAM_BOT_TOKEN   # paste the BotFather token
 npx wrangler secret put WEBHOOK_SECRET       # any long random string
-npx wrangler secret put JOIN_CODE            # a password for joining your bot
 
 npx wrangler deploy
 ```
 
-Generate the random strings with `openssl rand -hex 32` if you like.
+Generate the random string with `openssl rand -hex 32`. There is no join password to set —
+joining is by single-use invite code, minted from the dashboard.
 
 ### 3. Connect it to Telegram, and get your admin password
 
