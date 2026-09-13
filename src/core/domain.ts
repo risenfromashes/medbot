@@ -114,6 +114,18 @@ export interface MealRef {
   offsetMs: number;
 }
 
+/**
+ * One phase of a tapering course: a schedule, and how many days it runs before the next
+ * phase takes over. "4 times a day for 7 days, then 3 times a day for 7 days" is two of
+ * these, and it is an entirely routine thing for an eye prescription to say.
+ */
+export interface Phase {
+  spec: MedSpec;
+  intervalMs: number | null;
+  days: number;
+  label?: string;
+}
+
 export interface MedSpec {
   kind: ScheduleKind;
   intervalMs?: number;
@@ -160,6 +172,16 @@ export interface Medicine {
   steps: Step[];
   /** Gap between consecutive steps. Zero for a single-step medicine. */
   stepSpacingMs: number;
+  /**
+   * Medicines sharing this name must not be prompted within `spacingMs` of each other --
+   * eye drops needing ten minutes between them. Unlike the old group model this is a
+   * constraint, not a merge: each medicine keeps its own schedule and its own course.
+   */
+  spacingGroup: string | null;
+  spacingMs: number;
+  /** A tapering course. Null for the ordinary single-phase case. */
+  phases: Phase[] | null;
+  phaseIndex: number;
   intervalMs: number | null;
   /** Hard safety floor between two doses of this medicine. Never overridden by anything. */
   minGapMs: number;
@@ -342,6 +364,7 @@ export type Action =
       src: ResolutionSource;
     }
   | { t: 'completeMed'; medId: number; reason: string }
+  | { t: 'advancePhase'; medId: number; phaseIndex: number; label: string }
   | { t: 'createPrompt'; id: TempId; kind: PromptKind; body: PromptBody; tier: number }
   | { t: 'nudgePrompt'; promptId: number; at: number }
   | { t: 'escalatePrompt'; promptId: number; tier: number; at: number }

@@ -60,11 +60,25 @@ Schedule types, pick what matches:
   relation is before, after or with
 - {"type":"as_needed"}  for PRN/SOS; add max_per_day and min_gap
 
-Shorthand: for the 1+0+1 notation you may write "pattern": "1+0+1".
+TAPERING (very common for eye drops): when a medicine steps down
+partway through -- "4 times a day for 7 days, then 3 times a day for
+7 days" -- use phases instead of a schedule:
+  "phases": [
+    {"schedule":{"type":"times_per_day","n":4},"days":7,
+     "label":"4 times a day"},
+    {"schedule":{"type":"times_per_day","n":3},"days":7,
+     "label":"3 times a day"}
+  ]
+Do NOT flatten a taper to its first phase -- the rest would be lost.
+
+Shorthand: for the 1+0+1 notation you may write "pattern": "1+0+1",
+with "relation": "before" or "after" for before/after meals.
 
 Rules:
 - Eye drops or anything that must be spaced apart share one "group",
-  with "group_seq" giving the order. 10m is the usual gap.
+  with "spacing" in the groups list. 10m is the usual gap.
+  They KEEP their own separate schedules and courses -- grouping only
+  means they will never be asked for within that gap of each other.
 - "min_gap" is the shortest SAFE interval between doses. Set it to about
   three quarters of the scheduled interval. Err on the longer side.
 - "course": {"days":7} or {"doses":20} or {"until":"2026-10-01"}.

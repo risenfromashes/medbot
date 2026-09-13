@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { parsePrescription, describeSchedule } from '../src/core/prescription.js';
-import { HOUR, MINUTE } from '../src/core/tz.js';
+import { MINUTE } from '../src/core/tz.js';
 
 const NOW = Date.UTC(2026, 8, 14, 12);
 const load = (p: string): unknown => JSON.parse(readFileSync(p, 'utf8'));
@@ -14,24 +14,26 @@ describe('the real prescription', () => {
     expect(r.ok).toBe(true);
   });
 
-  it('folds the three eye drops into one medicine with three steps', () => {
-    const drops = r.value!.meds.find((m) => m.medKey === 'eye_drops')!;
-    expect(drops).toBeDefined();
-    expect(drops.steps.map((s) => s.name)).toEqual([
-      'antibiotic drop',
-      'steroid drop',
-      'lubricating drop',
-    ]);
-    expect(drops.stepSpacingMs).toBe(10 * MINUTE);
-    expect(drops.intervalMs).toBe(2 * HOUR);
-    expect(drops.minGapMs).toBe(90 * MINUTE);
-    // A spacing group is its own message sequence and must never be merged with others.
-    expect(drops.mergeable).toBe(false);
+  it('keeps each eye drop on its own schedule, constrained to stay 10 minutes apart', () => {
+    // The three drops in a real post-operative prescription have genuinely different
+    // frequencies. Merging them into one medicine -- the original design -- silently
+    // rewrote two of the three, so they stay separate and the gap is a constraint.
+    const drops = r.value!.meds.filter((m) => m.spacingGroup === 'eye_drops');
+    expect(drops.length).toBe(3);
+    for (const d of drops) {
+      expect(d.spacingMs).toBe(10 * MINUTE);
+      // A member of a spacing group must never share a message with anything else.
+      expect(d.mergeable).toBe(false);
+    }
+    // And each keeps its own course, rather than inheriting the first one's.
+    const byKey = new Map(drops.map((d) => [d.medKey, d]));
+    expect(byKey.get('antibiotic drop')!.courseDays).toBe(7);
+    expect(byKey.get('lubricant')!.courseDays).toBe(14);
   });
 
   it('keeps the standalone medicines separate', () => {
     const keys = r.value!.meds.map((m) => m.medKey).sort();
-    expect(keys).toEqual(['eye_drops', 'stomach capsule', 'painkiller']);
+    expect(keys).toEqual(['lubricant', 'antibiotic drop', 'stomach capsule', 'painkiller', 'steroid drop']);
     const stomach capsule = r.value!.meds.find((m) => m.medKey === 'stomach capsule')!;
     expect(describeSchedule(stomach capsule)).toBe('30 min before breakfast');
     const para = r.value!.meds.find((m) => m.medKey === 'painkiller')!;

@@ -15,7 +15,8 @@ import { tempIds } from './domain.js';
 import { planMeals } from './planMeals.js';
 import { planWake } from './planWake.js';
 import { planReports } from './planReport.js';
-import { courseComplete, nextDue, reviveAtWake, rollForwardAfter } from './planSchedule.js';
+import { activePhase, courseComplete, effectiveMed, nextDue, reviveAtWake, rollForwardAfter } from './planSchedule.js';
+import { applySpacing } from './planGroups.js';
 import { advanceMedicine } from './advance.js';
 import type { DayFacts } from './planSchedule.js';
 import type { Zone } from './tz.js';
@@ -105,6 +106,8 @@ export function plan(state: PatientState, now: number, z: Zone): Action[] {
 
   /** Doses that are due right now and still need a prompt. */
   const readyToPrompt: Array<{ dose: Dose; med: Medicine }> = [];
+  /** Every medicine's live dose after scheduling, before spacing and prompting. */
+  const settled: Array<{ dose: Dose; med: Medicine }> = [];
 
   for (const rawMed of state.meds) {
     if (rawMed.status !== 'active') continue;
@@ -114,7 +117,28 @@ export function plan(state: PatientState, now: number, z: Zone): Action[] {
     // built from the advanced one. Planning from the stale snapshot would recreate the
     // step that was just missed -- so drop two of an eye-drop group would be asked for
     // again instead of the group starting cleanly from drop one.
-    let med = rawMed;
+    // A tapering course changes schedule partway through, so everything below works on
+    // the medicine as it behaves *today*, not as it was first prescribed.
+    const phase = activePhase(rawMed, z, today);
+    if (rawMed.phases !== null && phase.index !== rawMed.phaseIndex && !phase.done) {
+      emit({
+        t: 'advancePhase',
+        medId: rawMed.id,
+        phaseIndex: phase.index,
+        label: phase.phase?.label ?? `phase ${phase.index + 1}`,
+      });
+      emit({
+        t: 'sendInfo',
+        tier: 0,
+        priority: 150,
+        dedupe: `phase:${rawMed.id}:${phase.index}`,
+        text:
+          `📉 <b>${rawMed.name}</b> steps down today.\n\n` +
+          `From now on: ${phase.phase?.label ?? 'the next phase of the course'}.`,
+      });
+    }
+
+    let med = effectiveMed(rawMed, z, today);
     let live = liveByMed.get(med.id) ?? null;
 
     // Roll-forward. The bot never stops nagging, but an unanswered prompt must never be
@@ -211,15 +235,31 @@ export function plan(state: PatientState, now: number, z: Zone): Action[] {
     if (med.awakeOnly && !med.critical) {
       if (!facts.awake && live.effectiveDueAt <= now && live.status !== 'deferred') {
         emit({ t: 'setDoseStatus', doseId: live.id, status: 'deferred' });
+        settled.push({ dose: { ...live, status: 'deferred' }, med });
         continue;
       }
       if (live.status === 'deferred') {
-        if (!facts.awake) continue;
+        if (!facts.awake) {
+          settled.push({ dose: live, med });
+          continue;
+        }
         const at = reviveAtWake(med, facts, now);
         emit({ t: 'retimeDose', doseId: live.id, effectiveDueAt: at, anchorKind: 'wake' });
         live = { ...live, effectiveDueAt: at, status: 'scheduled' };
       }
     }
+
+    // Collected rather than prompted here: the spacing constraint below may still move
+    // this dose, and prompting before that would defeat the whole point.
+    settled.push({ dose: live, med });
+  }
+
+  // --- 3b. keep spaced medicines apart ------------------------------------
+  applySpacing(settled, now, emit);
+
+  for (const item of settled) {
+    const { med } = item;
+    let live = item.dose;
 
     if (live.status === 'scheduled' && live.effectiveDueAt <= now) {
       emit({ t: 'setDoseStatus', doseId: live.id, status: 'due' });

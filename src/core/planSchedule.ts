@@ -10,7 +10,7 @@
  * cycle starts; `stepSpacingMs` governs the gaps inside it.
  */
 
-import type { Medicine, PatientState } from './domain.js';
+import type { Medicine, PatientState, Phase } from './domain.js';
 import type { LocalDay, Zone } from './tz.js';
 import { DAY_MS, HOUR } from './tz.js';
 
@@ -33,6 +33,37 @@ export interface DueResult {
   skipped: number;
   /** Set when the medicine cannot be scheduled yet, e.g. an after-meal dose pre-meal. */
   blocked?: 'awaiting_meal';
+}
+
+/**
+ * Which phase of a tapering course is in force, and how far into it we are.
+ *
+ * Phases are measured in local days from when the medicine started, so a taper advances
+ * on the day boundary the patient experiences rather than on a rolling 24-hour clock.
+ */
+export function activePhase(
+  med: Medicine,
+  z: Zone,
+  today: LocalDay,
+): { index: number; phase: Phase | null; done: boolean } {
+  if (med.phases === null || med.phases.length === 0) return { index: 0, phase: null, done: false };
+  if (med.startedAt === null) return { index: 0, phase: med.phases[0] ?? null, done: false };
+
+  const elapsed = z.diffLocalDays(z.localDay(med.startedAt), today);
+  let cursor = 0;
+  for (let i = 0; i < med.phases.length; i++) {
+    const phase = med.phases[i]!;
+    if (elapsed < cursor + phase.days) return { index: i, phase, done: false };
+    cursor += phase.days;
+  }
+  return { index: med.phases.length - 1, phase: med.phases[med.phases.length - 1] ?? null, done: true };
+}
+
+/** The medicine as it behaves right now, with the active phase's schedule applied. */
+export function effectiveMed(med: Medicine, z: Zone, today: LocalDay): Medicine {
+  const { phase } = activePhase(med, z, today);
+  if (phase === null) return med;
+  return { ...med, kind: phase.spec.kind, spec: phase.spec, intervalMs: phase.intervalMs };
 }
 
 /**
@@ -143,6 +174,12 @@ export function rollForwardAfter(med: Medicine): number {
 
 /** True when the course has run its length and the medicine should stop. */
 export function courseComplete(med: Medicine, now: number, z: Zone, today: LocalDay): boolean {
+  // A tapering course runs until its last phase has run out, whatever courseKind says.
+  if (med.phases !== null && med.phases.length > 0) {
+    if (med.startedAt === null) return false;
+    const total = med.phases.reduce((n, p) => n + p.days, 0);
+    return z.diffLocalDays(z.localDay(med.startedAt), today) >= total;
+  }
   switch (med.courseKind) {
     case 'indefinite':
       return false;

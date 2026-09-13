@@ -62,6 +62,17 @@ it will say which medicine and which field, so you can go back and fix it.
 > }
 > ```
 >
+> **Tapering** — very common for eye drops. When a medicine steps down partway through
+> ("4 times a day for 7 days, then 3 times a day for 7 days"), use `phases` rather than a
+> single schedule, or the rest of the course is lost:
+>
+> ```json
+> "phases": [
+>   { "schedule": { "type": "times_per_day", "n": 4 }, "days": 7, "label": "4 times a day" },
+>   { "schedule": { "type": "times_per_day", "n": 3 }, "days": 7, "label": "3 times a day" }
+> ]
+> ```
+>
 > **Schedule types** — pick the one that matches what is written:
 > - `{"type": "interval", "every": "2h", "anchor": "wake"}` — every N hours. Use
 >   `"anchor": "wake"` when dosing should start when the patient wakes up (typical for eye
@@ -78,8 +89,9 @@ it will say which medicine and which field, so you can go back and fix it.
 >
 > **Rules**
 > - Eye drops, or anything that must be spaced apart, all share the same `"group"`, with
->   `"group_seq"` giving the order. Put the spacing in `groups`. Ten minutes is the usual
->   gap for eye drops unless stated otherwise.
+>   the gap declared once in `groups`. Ten minutes is usual unless stated otherwise.
+>   Grouped medicines **keep their own separate schedules and courses** — the group only
+>   means the bot will never ask for two of them within that gap.
 > - `min_gap` is the *shortest safe interval* between two doses. Set it a little below the
 >   scheduled interval (about three quarters). This is a safety floor, so err on the
 >   longer side.

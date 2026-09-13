@@ -363,6 +363,22 @@ export class Db {
           rest.push(this.d1.prepare('UPDATE patients SET next_action_at = ?2 WHERE id = ?1').bind(pid, a.at));
           break;
 
+        case 'advancePhase':
+          rest.push(
+            this.d1.prepare('UPDATE medications SET phase_index = ?2 WHERE id = ?1').bind(a.medId, a.phaseIndex),
+            // The dose already scheduled under the previous phase is no longer right.
+            this.d1
+              .prepare(
+                `UPDATE doses SET status = 'cancelled', resolved_at = ?2, resolution_src = 'import'
+                 WHERE med_id = ?1 AND status IN ('scheduled','deferred','due','prompted')`,
+              )
+              .bind(a.medId, now),
+            this.d1
+              .prepare('INSERT INTO audit_log (patient_id, at, kind, med_id, actor, detail_json) VALUES (?1,?2,?3,?4,?5,?6)')
+              .bind(pid, now, 'phase_advanced', a.medId, 'system', JSON.stringify({ phaseIndex: a.phaseIndex, label: a.label })),
+          );
+          break;
+
         case 'markDigestSent':
           rest.push(this.d1.prepare('UPDATE patients SET last_digest_day = ?2 WHERE id = ?1').bind(pid, a.localDay));
           break;
@@ -702,15 +718,17 @@ export class Db {
             `INSERT INTO medications (patient_id, med_key, name, dose_text, notes, kind, spec_json, spec_hash,
                steps_json, step_spacing_ms, interval_ms, min_gap_ms, onset_offset_ms, max_per_day,
                awake_only, critical, drift_policy, drift_tolerance_ms, catchup_grace_ms, nag_policy_json,
-               mergeable, course_kind, course_days, course_doses, course_until, status, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,'active',?26)`,
+               mergeable, course_kind, course_days, course_doses, course_until, spacing_group, spacing_ms,
+               phases_json, status, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,'active',?29)`,
           )
           .bind(
             patientId, m.medKey, m.name, m.doseText, m.notes, m.kind, JSON.stringify(m.spec), m.specHash,
             JSON.stringify(m.steps), m.stepSpacingMs, m.intervalMs, m.minGapMs, m.onsetOffsetMs, m.maxPerDay,
             m.awakeOnly ? 1 : 0, m.critical ? 1 : 0, m.driftPolicy, m.driftToleranceMs, m.catchupGraceMs,
             JSON.stringify(m.nagPolicy), m.mergeable ? 1 : 0, m.courseKind, m.courseDays, m.courseDoses,
-            m.courseUntil, now,
+            m.courseUntil, m.spacingGroup, m.spacingMs,
+            m.phases === null ? null : JSON.stringify(m.phases), now,
           ),
       ),
     );
@@ -897,15 +915,17 @@ export class Db {
               `INSERT INTO medications (patient_id, med_key, name, dose_text, notes, kind, spec_json, spec_hash,
                  steps_json, step_spacing_ms, interval_ms, min_gap_ms, onset_offset_ms, max_per_day,
                  awake_only, critical, drift_policy, drift_tolerance_ms, catchup_grace_ms, nag_policy_json,
-                 mergeable, course_kind, course_days, course_doses, course_until, status, version_id, created_at)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,'active',?26,?27)`,
+                 mergeable, course_kind, course_days, course_doses, course_until, spacing_group,
+                 spacing_ms, phases_json, status, version_id, created_at)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,'active',?29,?30)`,
             )
             .bind(
               patientId, m.medKey, m.name, m.doseText, m.notes, m.kind, JSON.stringify(m.spec), m.specHash,
               JSON.stringify(m.steps), m.stepSpacingMs, m.intervalMs, m.minGapMs, m.onsetOffsetMs, m.maxPerDay,
               m.awakeOnly ? 1 : 0, m.critical ? 1 : 0, m.driftPolicy, m.driftToleranceMs, m.catchupGraceMs,
               JSON.stringify(m.nagPolicy), m.mergeable ? 1 : 0, m.courseKind, m.courseDays, m.courseDoses,
-              m.courseUntil, versionId, now,
+              m.courseUntil, m.spacingGroup, m.spacingMs,
+              m.phases === null ? null : JSON.stringify(m.phases), versionId, now,
             ),
         );
         continue;
@@ -921,7 +941,8 @@ export class Db {
                steps_json = ?8, step_spacing_ms = ?9, interval_ms = ?10, min_gap_ms = ?11, onset_offset_ms = ?12,
                max_per_day = ?13, awake_only = ?14, critical = ?15, drift_policy = ?16, drift_tolerance_ms = ?17,
                catchup_grace_ms = ?18, nag_policy_json = ?19, mergeable = ?20, course_kind = ?21, course_days = ?22,
-               course_doses = ?23, course_until = ?24, status = 'active', version_id = ?25, next_step = 0
+               course_doses = ?23, course_until = ?24, spacing_group = ?25, spacing_ms = ?26,
+               phases_json = ?27, status = 'active', version_id = ?28, next_step = 0
              WHERE id = ?1`,
           )
           .bind(
@@ -929,7 +950,8 @@ export class Db {
             JSON.stringify(m.steps), m.stepSpacingMs, m.intervalMs, m.minGapMs, m.onsetOffsetMs, m.maxPerDay,
             m.awakeOnly ? 1 : 0, m.critical ? 1 : 0, m.driftPolicy, m.driftToleranceMs, m.catchupGraceMs,
             JSON.stringify(m.nagPolicy), m.mergeable ? 1 : 0, m.courseKind, m.courseDays, m.courseDoses,
-            m.courseUntil, versionId,
+            m.courseUntil, m.spacingGroup, m.spacingMs,
+            m.phases === null ? null : JSON.stringify(m.phases), versionId,
           ),
         this.d1
           .prepare(
@@ -1224,6 +1246,14 @@ function rowToMed(r: Row): Medicine {
     specHash: str(r['spec_hash']),
     steps: json(r['steps_json'], [] as Medicine['steps']),
     stepSpacingMs: num(r['step_spacing_ms']),
+    spacingGroup: strOrNull(r['spacing_group']),
+    spacingMs: num(r['spacing_ms'] ?? 0),
+    phases: (() => {
+      const raw = r['phases_json'];
+      if (typeof raw !== 'string' || raw === '') return null;
+      try { return JSON.parse(raw) as Medicine['phases']; } catch { return null; }
+    })(),
+    phaseIndex: num(r['phase_index'] ?? 0),
     intervalMs: numOrNull(r['interval_ms']),
     minGapMs: num(r['min_gap_ms']),
     onsetOffsetMs: num(r['onset_offset_ms']),

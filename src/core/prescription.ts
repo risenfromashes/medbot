@@ -11,7 +11,7 @@
  * chat window before the JSON arrived.
  */
 
-import type { CourseKind, DriftPolicy, MedSpec, NagPolicy, ScheduleKind, Step } from './domain.js';
+import type { CourseKind, DriftPolicy, MedSpec, NagPolicy, Phase, ScheduleKind, Step } from './domain.js';
 import { parseDuration } from './timeparse.js';
 import { HOUR, MINUTE, isValidTimeZone, parseWall } from './tz.js';
 
@@ -24,6 +24,9 @@ export interface NormalizedMed {
   spec: MedSpec;
   steps: Step[];
   stepSpacingMs: number;
+  spacingGroup: string | null;
+  spacingMs: number;
+  phases: Phase[] | null;
   intervalMs: number | null;
   minGapMs: number;
   onsetOffsetMs: number;
@@ -237,7 +240,42 @@ export function parsePrescription(raw: unknown, opts: { now: number } = { now: D
     }
     seenKeys.add(medKey);
 
-    const parsed = parseSchedule(c, where, mr, meals);
+    // A tapering course: "4 times a day for 7 days, then 3 times a day for 7 days".
+    // Routine in ophthalmology, and impossible to express without this. Parsed before the
+    // top-level schedule, because a tapering medicine is entirely defined by its phases
+    // and has no single schedule to give.
+    let phases: Phase[] | null = null;
+    if (Array.isArray(mr['phases'])) {
+      const list: Phase[] = [];
+      for (const [pi, ph] of mr['phases'].entries()) {
+        if (!isRecord(ph)) {
+          c.err(where, `phases[${pi}] should be an object`);
+          continue;
+        }
+        const days = typeof ph['days'] === 'number' ? ph['days'] : null;
+        if (days === null || days < 1) {
+          c.err(where, `phases[${pi}] needs "days", e.g. {"days": 7, ...}`);
+          continue;
+        }
+        const sub = parseSchedule(c, `${where} phase ${pi + 1}`, ph, meals);
+        if (sub === null) continue;
+        list.push({
+          spec: sub.spec,
+          intervalMs: sub.intervalMs,
+          days,
+          label: typeof ph['label'] === 'string' ? ph['label'] : describeSchedule(sub) + ` for ${days} days`,
+        });
+      }
+      if (list.length > 0) phases = list;
+      if (list.length === 1) {
+        c.warn(where, 'only one phase given; that is just an ordinary course');
+      }
+    }
+
+    // The first phase stands in as the medicine's schedule until the taper moves on.
+    const parsed = phases !== null
+      ? { kind: phases[0]!.spec.kind, spec: phases[0]!.spec, intervalMs: phases[0]!.intervalMs }
+      : parseSchedule(c, where, mr, meals);
     if (parsed === null) continue;
 
     const minGapDefault =
@@ -263,6 +301,9 @@ export function parsePrescription(raw: unknown, opts: { now: number } = { now: D
       spec: parsed.spec,
       steps: [{ name: name !== '' ? name : medKey, ...(typeof mr['dose'] === 'string' ? { dose: mr['dose'] } : {}) }],
       stepSpacingMs: 0,
+      spacingGroup: null,
+      spacingMs: 0,
+      phases,
       intervalMs: parsed.intervalMs,
       minGapMs,
       onsetOffsetMs: c.dur(where, 'onset_offset', mr['onset_offset'], 0) ?? 0,
@@ -284,58 +325,57 @@ export function parsePrescription(raw: unknown, opts: { now: number } = { now: D
     };
 
     if (draft.critical && draft.awakeOnly) draft.awakeOnly = false;
+    if (phases !== null) {
+      // The course runs as long as the phases together say it does.
+      draft.courseKind = 'days';
+      draft.courseDays = phases.reduce((n, ph) => n + ph.days, 0);
+    }
     drafts.push(draft);
   }
 
-  // Fold each spacing group into a single medicine with ordered steps. Three eye drops
-  // ten minutes apart become one medicine with three steps, which is what makes "only one
-  // of them may be pending at a time" a property of the schema rather than a rule some
-  // code path has to keep remembering.
+  // A spacing group is a CONSTRAINT, not a merge.
+  //
+  // The first design folded a group into one medicine with ordered steps, on the
+  // assumption that drops needing a gap between them share a schedule. A real
+  // post-operative prescription disproved that: three drops needing ten minutes apart,
+  // one four times a day for 14 days, one four times a day for 7, and a lubricant every
+  // two hours indefinitely. Folding silently rewrote two of the three. So each keeps its
+  // own schedule and its own course, and the planner simply refuses to prompt two members
+  // within the gap.
   const meds: NormalizedMed[] = [];
-  const byGroup = new Map<string, Draft[]>();
+  const groupCounts = new Map<string, number>();
   for (const d of drafts) {
-    if (d.group === null) {
-      meds.push(stripDraft(d));
-      continue;
-    }
-    const list = byGroup.get(d.group) ?? [];
-    list.push(d);
-    byGroup.set(d.group, list);
+    if (d.group !== null) groupCounts.set(d.group, (groupCounts.get(d.group) ?? 0) + 1);
   }
 
-  for (const [groupId, members] of byGroup) {
-    members.sort((a, b) => a.groupSeq - b.groupSeq);
-    const head = members[0]!;
-    if (members.length === 1) {
-      meds.push(stripDraft(head));
-      continue;
+  for (const d of drafts) {
+    const med = stripDraft(d);
+    if (d.group !== null && (groupCounts.get(d.group) ?? 0) > 1) {
+      med.spacingGroup = d.group;
+      med.spacingMs = groupSpacing.get(d.group) ?? 10 * MINUTE;
+      // Members of a spacing group must never share a message with anything, or the gap
+      // the prescription asks for is meaningless.
+      med.mergeable = false;
     }
-    const differing = members.filter((m) => m.intervalMs !== head.intervalMs || m.kind !== head.kind);
-    if (differing.length > 0) {
+    meds.push(med);
+  }
+
+  for (const [groupId, count] of groupCounts) {
+    if (count > 1) {
+      const gap = groupSpacing.get(groupId) ?? 10 * MINUTE;
       c.warn(
         `group "${groupId}"`,
-        `members have different schedules; using ${head.name}'s (${describeSchedule(head)}) for the whole group`,
+        `${count} medicines will be kept at least ${Math.round(gap / MINUTE)} minutes apart from each other`,
       );
     }
-    meds.push({
-      ...stripDraft(head),
-      medKey: groupId,
-      name: members.map((m) => m.name).join(' + '),
-      doseText: null,
-      steps: members.map((m) => ({
-        name: m.name,
-        ...(m.doseText !== null ? { dose: m.doseText } : {}),
-        ...(m.notes !== null ? { note: m.notes } : {}),
-      })),
-      stepSpacingMs: groupSpacing.get(groupId) ?? 10 * MINUTE,
-      // A group is inherently its own message sequence; never merge it with other meds.
-      mergeable: false,
-    });
   }
 
   for (const m of meds) {
     m.specHash = hashString(
-      JSON.stringify([m.kind, m.spec, m.steps, m.stepSpacingMs, m.intervalMs, m.minGapMs, m.courseKind, m.courseDays, m.courseDoses]),
+      JSON.stringify([
+        m.kind, m.spec, m.steps, m.stepSpacingMs, m.intervalMs, m.minGapMs,
+        m.courseKind, m.courseDays, m.courseDoses, m.spacingGroup, m.spacingMs, m.phases,
+      ]),
     );
   }
 
@@ -457,9 +497,23 @@ function parseSchedule(
           intervalMs: null,
         };
       }
-      // Several meals a day: express as wall-clock slots at those meals' usual times, so
-      // the patient is not blocked waiting to confirm a meal for every dose.
-      const times = active.map((a) => meals.find((m) => m.meal === a.meal)?.typicalLocal ?? defaultMealTime(a.meal));
+      // Several meals a day: wall-clock slots at those meals' usual times, so the patient
+      // is not blocked waiting to confirm a meal for every dose. The before/after relation
+      // has to survive that translation -- "before meal" on a proton-pump inhibitor means
+      // half an hour before food, and silently dropping it schedules the dose at exactly
+      // the wrong moment.
+      const rel = relation === 'before' ? 'before' : relation === 'with' ? 'with' : 'after';
+      // "before meal" on its own implies a real gap -- a proton-pump inhibitor wants
+      // half an hour before food. "after meal" just means with or just after it, so it
+      // takes no default delay; anything else would be inventing a time the prescription
+      // did not ask for.
+      const offsetMs = c.dur(where, 'offset', mr['offset'], rel === 'before' ? 30 * MINUTE : 0) ?? 0;
+      const times = active.map((a) => {
+        const base = meals.find((m) => m.meal === a.meal)?.typicalLocal ?? defaultMealTime(a.meal);
+        const shift = rel === 'before' ? -offsetMs / MINUTE : rel === 'after' ? offsetMs / MINUTE : 0;
+        return addMinutesToWall(base, Math.round(shift));
+      });
+      times.sort();
       return { kind: 'fixed_times', spec: { kind: 'fixed_times', times }, intervalMs: null };
     }
     c.err(where, `"pattern": "${mr['pattern']}" should look like "1+0+1"`);

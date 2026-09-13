@@ -51,12 +51,28 @@ available per medicine.
 
 ### Spacing groups
 
-Three eye drops that must be ten minutes apart are modelled as **one medicine with three
-steps**, not three medicines plus a constraint. The gap is measured from the previous drop
-*actually* going in, so being slow on drop one pushes drops two and three along with it.
+"Please give 10 mins gap between 2 drops" is a constraint between medicines, not a shared
+schedule. The first design got this wrong: it folded a group into one medicine with
+ordered steps, on the assumption that drops needing a gap are on the same frequency.
 
-Medicines with no spacing that fall due within five minutes of each other are merged into a
-single message with a checklist, rather than three notifications ninety seconds apart.
+A real post-operative prescription disproved that — three drops all needing ten minutes
+between them, but one four times a day for 14 days, one four times a day for 7 then three
+times a day for 7, and a lubricant every two hours indefinitely. Folding them silently
+rewrote two of the three, turning a two-hourly lubricant into four doses a day and
+truncating an indefinite course at fourteen days.
+
+So each medicine keeps its own schedule and its own course, and the planner refuses to
+place two members of a group within the gap. The floor is measured from the last dose any
+member was *actually* taken, so three drops due at once become 08:00, 08:10 and 08:20 —
+and if the first is really taken at 08:03, the other two shift to 08:13 and 08:23.
+
+### Tapering courses
+
+"4 times a day for 7 days, then 3 times a day for 7 days" is routine in ophthalmology and
+was impossible to express at all — the second phase simply vanished on import. A medicine
+can now carry ordered `phases`, each with its own schedule and a length in days. The
+planner resolves the active phase by elapsed local days, cancels the dose scheduled under
+the old rule when the taper steps down, and tells the patient it has changed.
 
 ### Nagging
 

@@ -505,6 +505,14 @@ function rowToMedLite(r: Row): Medicine {
     specHash: str(r['spec_hash']),
     steps: parse(r['steps_json'], [] as Medicine['steps']),
     stepSpacingMs: num(r['step_spacing_ms']),
+    spacingGroup: strOrNull(r['spacing_group']),
+    spacingMs: num(r['spacing_ms'] ?? 0),
+    phases: (() => {
+      const raw = r['phases_json'];
+      if (typeof raw !== 'string' || raw === '') return null;
+      try { return JSON.parse(raw) as Medicine['phases']; } catch { return null; }
+    })(),
+    phaseIndex: num(r['phase_index'] ?? 0),
     intervalMs: numOrNull(r['interval_ms']),
     minGapMs: num(r['min_gap_ms']),
     onsetOffsetMs: num(r['onset_offset_ms']),
