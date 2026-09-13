@@ -326,6 +326,21 @@ export class AdminDb {
     return { ok: true, invite };
   }
 
+  /**
+   * Read an invite without claiming it.
+   *
+   * Every reason to refuse a code has to be found before the claim, not after. These are
+   * single use: consuming one and then rejecting it leaves the holder with something dead
+   * and no explanation.
+   */
+  async peekInvite(code: string): Promise<Invite | null> {
+    const row = await this.d1
+      .prepare('SELECT * FROM invites WHERE code = ?1')
+      .bind(code.trim().toUpperCase())
+      .first<Row>();
+    return row === null ? null : rowToInvite(row);
+  }
+
   async liveInvites(now: number): Promise<Invite[]> {
     const res = await this.d1
       .prepare('SELECT * FROM invites WHERE used_at IS NULL AND expires_at > ?1 ORDER BY created_at DESC')

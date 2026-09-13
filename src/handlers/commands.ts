@@ -64,15 +64,38 @@ const reply = async (ctx: CmdCtx, text: string, buttons?: Array<Array<{ text: st
   await ctx.tg.sendMessage(ctx.chatId, text, buttons !== undefined ? { replyMarkup: { inline_keyboard: buttons } } : {});
 };
 
-/** Which patient is this chat acting for? */
+/**
+ * The chat's OWN record.
+ *
+ * There is one kind of account. Everybody who joins has their own prescription, and may
+ * additionally back other people up -- that is a relationship, not a different sort of
+ * user. Self-directed commands therefore always mean yourself: `/import` while backing
+ * someone up must never quietly rewrite *their* prescription.
+ */
 async function activePatient(ctx: CmdCtx): Promise<{ patient: Patient; z: Zone; canAck: boolean } | null> {
   const links = await ctx.db.linksForChat(ctx.chatId);
-  if (links.length === 0) return null;
-  // Prefer the chat's own patient over anyone they merely watch.
-  const self = links.find((l) => l.role === 'patient') ?? links[0]!;
+  const self = links.find((l) => l.role === 'patient');
+  if (self === undefined) return null;
   const patient = await ctx.db.getPatient(self.patientId);
   if (patient === null) return null;
   return { patient, z: zoneFor(patient.tz), canAck: self.canAck };
+}
+
+/** Resolve a patient this chat may look at: itself, or anyone it backs up. */
+async function resolveViewable(
+  ctx: CmdCtx,
+  query: string,
+): Promise<{ patient: Patient; z: Zone; isSelf: boolean } | null> {
+  const links = await ctx.db.linksForChat(ctx.chatId);
+  const wanted = query.trim().toLowerCase();
+  for (const l of links) {
+    const p = await ctx.db.getPatient(l.patientId);
+    if (p === null) continue;
+    if (wanted === '' ? l.role === 'patient' : p.displayName.toLowerCase().includes(wanted)) {
+      return { patient: p, z: zoneFor(p.tz), isSelf: l.role === 'patient' };
+    }
+  }
+  return null;
 }
 
 /** Match a user-typed medicine name against the patient's list, loosely but safely. */
@@ -112,8 +135,8 @@ export async function handleCommand(ctx: CmdCtx, msg: TgIncomingMessage): Promis
     case 'skip': return cmdSkip(ctx, args);
     case 'snooze': return cmdSnooze(ctx, args);
     case 'undo': return cmdUndo(ctx);
-    case 'status': return cmdStatus(ctx);
-    case 'meds': case 'medicines': return cmdMeds(ctx);
+    case 'status': return cmdStatus(ctx, args);
+    case 'meds': case 'medicines': return cmdMeds(ctx, args);
     case 'import': return cmdImport(ctx, args, msg);
     case 'prompt': case 'template': case 'json': return cmdPrompt(ctx);
     case 'edit': case 'set': return cmdEdit(ctx, args);
@@ -199,8 +222,10 @@ async function cmdStart(ctx: CmdCtx, args: string): Promise<void> {
       '<b>Two things to do next</b>\n' +
       '1. <code>/tz Asia/Dhaka</code> — so I know what time it is for you.\n' +
       '2. <code>/import</code> — send me your prescription as JSON.\n\n' +
-      "Don't have the JSON? Photograph your prescription, give it to any AI chatbot with the " +
-      'template from /help, and paste back what it gives you. I check it carefully before anything takes effect.',
+      "Don't have the JSON? Send <code>/prompt</code> and I'll give you the text to paste into any " +
+      'AI chatbot along with a photo of your prescription. I check the result carefully before ' +
+      'anything takes effect.\n\n' +
+      "<i>If someone should be told when you miss a dose, <code>/invite</code> gives them a code.</i>",
   );
 }
 
@@ -313,18 +338,39 @@ async function cmdCaregiver(ctx: CmdCtx, args: string): Promise<void> {
   }
 
   const adb = new AdminDb(ctx.env.MEDBOT_DB);
+
+  // Look before claiming. Every reason to refuse -- wrong kind, your own code -- has to be
+  // found first, or a single-use code is burned on a command that then rejects it.
+  const peeked = await adb.peekInvite(code);
+  const existing = await ctx.db.linksForChat(ctx.chatId);
+
+  if (peeked !== null && peeked.kind !== 'caregiver') {
+    await reply(
+      ctx,
+      "That's a <b>joining</b> code, for someone new to this bot.\n\n" +
+        `Send <code>/start ${esc(code.toUpperCase())}</code> instead.`,
+    );
+    return;
+  }
+
+  if (
+    peeked !== null && peeked.patientId !== null &&
+    existing.some((l) => l.patientId === peeked.patientId && l.role === 'patient')
+  ) {
+    // Backing up yourself is not a safety net; it is the same person twice.
+    await reply(
+      ctx,
+      "That's your own code — you can't be your own backup.\n\n" +
+        'Give it to someone else, and they send <code>/caregiver ' + esc(code.toUpperCase()) + '</code>.',
+    );
+    return;
+  }
+
   const result = await adb.redeemInvite(code, ctx.chatId, ctx.now, 'caregiver');
   if (!result.ok) {
-    if (result.reason === 'wrong_kind') {
-      await reply(
-        ctx,
-        "That's a <b>joining</b> code, for someone new to this bot.\n\n" +
-          `Send <code>/start ${esc(code.toUpperCase())}</code> instead.`,
-      );
-      return;
-    }
     const why =
-      result.reason === 'used' ? 'That code has already been used.'
+      result.reason === 'wrong_kind' ? 'That code is not a caregiver code.'
+      : result.reason === 'used' ? 'That code has already been used.'
       : result.reason === 'expired' ? 'That code has expired.'
       : 'That code is not valid.';
     await reply(ctx, `${why} Ask them to run /invite again — each code works once.`);
@@ -337,27 +383,28 @@ async function cmdCaregiver(ctx: CmdCtx, args: string): Promise<void> {
     return;
   }
 
-  // Backing up yourself is not a safety net; it is the same person twice. Refuse rather
-  // than create a link that looks like cover and provides none.
-  const existing = await ctx.db.linksForChat(ctx.chatId);
-  if (existing.some((l) => l.patientId === invite.patientId && l.role === 'patient')) {
-    await reply(
-      ctx,
-      "That's your own code — you can't be your own backup.\n\n" +
-        'Give it to someone else, and they send <code>/caregiver ' + esc(code.toUpperCase()) + '</code>.',
-    );
-    return;
-  }
-
   const delay = invite.escalateAfterMs ?? 5 * MINUTE;
   const patient = await ctx.db.getPatient(invite.patientId);
+
+  // Backing someone up does not make you a different sort of user. If this chat has no
+  // record of its own yet, it gets one now -- so they can import their own prescription
+  // without having to be invited a second time.
+  let own = existing.find((l) => l.role === 'patient');
+  if (own === undefined) {
+    const ownId = await ctx.db.createPatient(ctx.userName, patient?.tz ?? 'UTC', ctx.now);
+    await ctx.db.linkChat(ctx.chatId, ownId, 'patient', 0, 5 * MINUTE, ctx.now, ctx.userName);
+    own = (await ctx.db.linksForChat(ctx.chatId)).find((l) => l.role === 'patient');
+  }
+
   await ctx.db.linkChat(ctx.chatId, invite.patientId, 'caregiver', 1, delay, ctx.now, ctx.userName);
   await reply(
     ctx,
     `✅ You're now the backup for <b>${esc(patient?.displayName ?? 'them')}</b>.\n\n` +
       `If they don't answer within ${fmtDuration(delay)} — medicines, meals, waking up, going to bed — ` +
       "I'll ask you instead, and you can answer on their behalf. Otherwise I'll leave you alone.\n\n" +
-      '<i>You can step back at any time with /leave.</i>',
+      "You also have your own account here, so if you're ever prescribed something yourself, " +
+      '<code>/import</code> it and I\'ll remind you too.\n\n' +
+      '<i>Step back at any time with /leave.</i>',
   );
   // Tell them their safety net is in place, from the chat that will be doing the asking.
   for (const chat of await ctx.db.chatsFor(invite.patientId)) {
@@ -670,15 +717,22 @@ async function cmdUndo(ctx: CmdCtx): Promise<void> {
 
 // --- information ---------------------------------------------------------
 
-async function cmdStatus(ctx: CmdCtx): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
-  const { patient, z } = ap;
+async function cmdStatus(ctx: CmdCtx, args = ''): Promise<void> {
+  // Your own by default; name someone you back up to see theirs.
+  const view = await resolveViewable(ctx, args);
+  if (view === null) {
+    if (args.trim() !== '') {
+      await reply(ctx, `You're not linked to anyone called "${esc(args.trim())}". /patients lists who you are.`);
+      return;
+    }
+    return needsSetup(ctx);
+  }
+  const { patient, z } = view;
   const meds = await ctx.db.medsFor(patient.id);
   const today = z.localDay(ctx.now);
 
   const lines: string[] = [
-    `<b>${esc(patient.displayName)}</b> · ${z.fmtTime12(ctx.now)}`,
+    `<b>${esc(patient.displayName)}</b>${view.isSelf ? '' : ' <i>(you back them up)</i>'} · ${z.fmtTime12(ctx.now)}`,
     patient.wakeState === 'awake'
       ? `☀️ Awake${patient.lastWakeAt !== null ? ` since ${z.fmtTime12(patient.lastWakeAt)}` : ''}` +
         (patient.wakeConfidence === 'confirmed' ? '' : ` <i>(${patient.wakeConfidence})</i>`)
@@ -686,7 +740,9 @@ async function cmdStatus(ctx: CmdCtx): Promise<void> {
   ];
 
   if (meds.length === 0) {
-    lines.push('', 'No medicines yet — send /import, or /prompt to get the format.');
+    lines.push('', view.isSelf
+      ? 'No medicines yet — send /import, or /prompt to get the format.'
+      : 'They have no medicines loaded yet.');
     await reply(ctx, lines.join('\n'));
     return;
   }
@@ -753,9 +809,10 @@ async function cmdStatus(ctx: CmdCtx): Promise<void> {
   await reply(ctx, lines.join('\n'));
 }
 
-async function cmdMeds(ctx: CmdCtx): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+async function cmdMeds(ctx: CmdCtx, args = ''): Promise<void> {
+  const view = await resolveViewable(ctx, args);
+  if (view === null) return needsSetup(ctx);
+  const ap = { patient: view.patient, z: view.z };
   const meds = await ctx.db.medsFor(ap.patient.id, true);
   if (meds.length === 0) {
     await reply(ctx, 'No medicines yet. Send me a prescription with /import.');
@@ -1393,6 +1450,24 @@ async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
     digest: { column: 'digest_at', label: 'send the daily summary' },
   };
 
+  if (parts.length >= 2 && ['name', 'callme'].includes(parts[0]!.toLowerCase())) {
+    const newName = parts.slice(1).join(' ').trim().slice(0, 60);
+    if (newName === '') {
+      await reply(ctx, 'What should I call you? e.g. <code>/settings name Ayesha</code>');
+      return;
+    }
+    await ctx.env.MEDBOT_DB
+      .prepare('UPDATE patients SET display_name = ?2 WHERE id = ?1')
+      .bind(patient.id, newName)
+      .run();
+    await ctx.env.MEDBOT_DB
+      .prepare("UPDATE chats SET display_name = ?2 WHERE chat_id = ?1 AND role = 'patient'")
+      .bind(ctx.chatId, newName)
+      .run();
+    await reply(ctx, `⚙️ I'll call you <b>${esc(newName)}</b> from now on.`);
+    return;
+  }
+
   if (parts.length >= 2) {
     const key = parts[0]!.toLowerCase();
     const entry = FIELDS[key];
@@ -1420,6 +1495,7 @@ async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
   await reply(
     ctx,
     `<b>⚙️ Settings</b> · ${esc(patient.displayName)}\n\n` +
+      `Name           <code>${esc(patient.displayName)}</code>\n` +
       `Timezone       <code>${esc(patient.tz)}</code> — it's ${z.fmtTime12(ctx.now)} there\n` +
       `Morning ask    <code>${esc(patient.morningPollAt)}</code>\n` +
       `Assume awake   <code>${esc(patient.presumedWakeAt)}</code>\n` +
@@ -1427,6 +1503,7 @@ async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
       `Assume asleep  <code>${esc(patient.presumedSleepAt)}</code>\n` +
       `Daily summary  <code>${esc(patient.digestAt)}</code>\n\n` +
       `<b>To change one</b>\n` +
+      `<code>/settings name Ayesha</code>\n` +
       `<code>/settings morning 06:30</code>\n` +
       `<code>/settings wake 09:00</code>\n` +
       `<code>/settings evening 22:30</code>\n` +
@@ -1484,7 +1561,13 @@ If I already logged a dose as missed and you actually took it, just tell me the 
 <code>/log 7</code> — adherence · <code>/tz Asia/Dhaka</code>
 
 <b>Sharing</b>
+There is one kind of account. You have your own prescription, and you can also back other people up — that's a relationship, not a different sort of login.
+
 <code>/invite</code> — get a code so someone can back you up. If you don't answer within a few minutes, I'll ask them instead, and they can answer for you.
+<code>/caregiver &lt;code&gt;</code> — back someone else up, using their code.
+<code>/patients</code> — who you're linked to, with buttons to end any of it.
+<code>/leave</code> — stop backing someone up.
+<code>/status &lt;name&gt;</code> · <code>/meds &lt;name&gt;</code> — check on someone you back up.
 
 Every evening I send a short summary of the day. If that stops arriving, something is wrong — <code>/health</code> tells you whether the scheduler is still running.
 

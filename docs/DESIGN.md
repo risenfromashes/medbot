@@ -156,13 +156,28 @@ Nagging stops while you're asleep and resumes in the morning. Each nudge is a ne
 with the previous one deleted, because editing a Telegram message doesn't produce a
 notification, and a nudge nobody is notified about isn't a nudge.
 
+### One kind of account
+
+Everybody who joins has their own record and their own prescription. Backing someone else
+up is a *relationship*, not a different sort of user — you can be somebody's backup and
+still be prescribed something yourself, and both work at once.
+
+Getting that wrong caused two real bugs. Someone who arrived only as a backup had no record
+of their own, so `/import` had nothing to import into; worse, the lookup fell back to the
+first link it found, which meant importing could have quietly rewritten *the other
+person's* prescription. Self-directed commands now always resolve to the chat's own record,
+and a chat that arrives as a backup gets its own record at the same moment.
+
+You also cannot be your own backup. It reads as cover and provides none — the same person
+twice.
+
 ### Joining, and leaving
 
 Two kinds of invite code, deliberately not interchangeable. A **joining** code creates a
 new person in the group and is redeemed with `/start`; a **caregiver** code links you as
-someone's backup and is redeemed with `/caregiver`. Offering one to the wrong command is
-refused *without consuming it* — these are single use, and burning one on the wrong command
-would leave someone holding a dead code with no idea why.
+someone's backup and is redeemed with `/caregiver`. Every reason to refuse — wrong kind, your
+own code — is checked *before* the code is claimed. These are single use, and consuming one
+and then rejecting it leaves the holder with something dead and no explanation.
 
 Either side can end a caregiver arrangement: the caregiver with `/leave`, the patient from
 the buttons under `/patients`. Both parties are told when it ends, because otherwise one

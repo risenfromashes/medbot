@@ -76,3 +76,35 @@ describe('you cannot become your own backup', () => {
     expect(src).toContain("you can't be your own backup");
   });
 });
+
+describe('there is one kind of account', () => {
+  it('self-directed commands resolve to the chat own record, never to someone it backs up', async () => {
+    const src = (await import('node:fs')).readFileSync('src/handlers/commands.ts', 'utf8');
+    const fn = src.slice(src.indexOf('async function activePatient'), src.indexOf('/** Resolve a patient this chat may look at'));
+    // The old version fell back to links[0], so a chat that only backed someone up would
+    // have had /import quietly rewrite THEIR prescription.
+    expect(fn, 'activePatient can still fall back to a caregiver link').not.toContain('?? links[0]');
+    expect(fn).toContain("links.find((l) => l.role === 'patient')");
+  });
+
+  it('someone arriving only as a backup still gets their own record', async () => {
+    const src = (await import('node:fs')).readFileSync('src/handlers/commands.ts', 'utf8');
+    const fn = src.slice(src.indexOf('async function cmdCaregiver'));
+    expect(fn, 'a backup-only chat is left with no prescription of its own').toContain('createPatient');
+  });
+
+  it('refuses every bad code before claiming it, not after', async () => {
+    const src = (await import('node:fs')).readFileSync('src/handlers/commands.ts', 'utf8');
+    const from = src.indexOf('async function cmdCaregiver');
+    const next = src.indexOf('\nasync function ', from + 1);
+    const fn = src.slice(from, next === -1 ? undefined : next);
+    const peek = fn.indexOf('peekInvite');
+    const redeem = fn.indexOf('redeemInvite');
+    const selfCheck = fn.indexOf("your own code");
+    expect(peek, 'no peek before the claim').toBeGreaterThan(-1);
+    expect(peek, 'peek happens after the claim').toBeLessThan(redeem);
+    // The reason this ordering matters: these codes are single use, so consuming one and
+    // then refusing it leaves the holder with something dead and no explanation.
+    expect(selfCheck, 'the self-backup check runs after the code is already consumed').toBeLessThan(redeem);
+  });
+});
