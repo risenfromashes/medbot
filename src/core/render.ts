@@ -272,15 +272,28 @@ export function renderEditMenu(med: Medicine, z: Zone): Rendered {
     med.doseText === null ? '' : esc(med.doseText),
   ];
 
-  if (med.kind === 'interval') {
-    const hours = (med.intervalMs ?? 0) / HOUR;
-    lines.push('', `Currently every ${hours % 1 === 0 ? hours : (med.intervalMs ?? 0) / MINUTE + 'm'}${hours % 1 === 0 ? 'h' : ''}.`);
-    // Offer the neighbouring intervals people actually move between.
-    const choices = [2, 3, 4, 6, 8, 12].filter((h) => h !== hours);
-    rows.push(choices.slice(0, 3).map((h) => set('every', `${h}h`, `every ${h}h`)));
-    rows.push(choices.slice(3).map((h) => set('every', `${h}h`, `every ${h}h`)));
-  } else if (med.kind === 'fixed_times') {
-    lines.push('', `Currently at ${(med.spec.times ?? []).join(', ')}.`);
+  if (med.kind === 'interval' || med.kind === 'fixed_times') {
+    if (med.kind === 'interval') {
+      const total = Math.round((med.intervalMs ?? 0) / MINUTE);
+      const h = Math.floor(total / 60);
+      const m = total % 60;
+      lines.push('', `Currently every ${h === 0 ? `${m}m` : m === 0 ? `${h}h` : `${h}h ${m}m`}${med.spec.anchor === 'wake' ? ' from waking' : ''}.`);
+    } else {
+      lines.push('', `Currently at ${(med.spec.times ?? []).join(', ')}.`);
+    }
+
+    // How many a day is the change people actually make mid-course -- a doctor says
+    // "drop it to three times a day", not "make it every four hours and forty minutes".
+    lines.push('<i>How many times a day?</i>');
+    rows.push([2, 3, 4].map((n) => set('perday', String(n), `${n}× a day`)));
+    rows.push([5, 6, 8].map((n) => set('perday', String(n), `${n}× a day`)));
+
+    if (med.kind === 'interval') {
+      const hours = (med.intervalMs ?? 0) / HOUR;
+      lines.push('<i>Or set the gap directly:</i>');
+      const choices = [2, 3, 4, 6].filter((x) => x !== hours);
+      rows.push(choices.map((x) => set('every', `${x}h`, `every ${x}h`)));
+    }
   }
 
   if (med.steps.length > 1) {

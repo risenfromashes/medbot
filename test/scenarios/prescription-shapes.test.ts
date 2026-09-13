@@ -334,3 +334,91 @@ describe('the order drops are asked for', () => {
     }
   });
 });
+
+describe('changing how many doses a day', () => {
+  it('lands on the same schedule an import of that number would have', async () => {
+    const { dosesPerDayInterval, parsePrescription } = await import('../../src/core/prescription.js');
+
+    // What /edit perday 3 computes...
+    const edited = dosesPerDayInterval('08:00', '22:00', 3);
+    // ...must match what importing "3 times a day" produces, or the two drift apart.
+    const imported = parsePrescription({
+      medicines: [{ id: 'x', name: 'X', schedule: { type: 'times_per_day', n: 3, from: '08:00', to: '22:00' } }],
+    }, { now: 0 }).value!.meds[0]!;
+
+    expect(edited).toBe(imported.intervalMs);
+    expect(imported.spec.anchor).toBe('wake');
+  });
+
+  it('spreads more doses closer together, fewer further apart', async () => {
+    const { dosesPerDayInterval } = await import('../../src/core/prescription.js');
+    const four = dosesPerDayInterval('07:00', '22:00', 4);
+    const three = dosesPerDayInterval('07:00', '22:00', 3);
+    const two = dosesPerDayInterval('07:00', '22:00', 2);
+    expect(four).toBeLessThan(three);
+    expect(three).toBeLessThan(two);
+    // Four doses across a fifteen-hour day is five hours apart.
+    expect(Math.round(four / (60 * 60_000))).toBe(5);
+  });
+
+  it('fits the doses inside a shorter waking day', async () => {
+    const { dosesPerDayInterval } = await import('../../src/core/prescription.js');
+    const long = dosesPerDayInterval('06:00', '23:00', 4);
+    const short = dosesPerDayInterval('10:00', '20:00', 4);
+    expect(short).toBeLessThan(long);
+  });
+
+  it('treats once a day as daily, not as an impossible division', async () => {
+    const { dosesPerDayInterval } = await import('../../src/core/prescription.js');
+    expect(dosesPerDayInterval('08:00', '22:00', 1)).toBe(24 * HOUR);
+  });
+
+  it('actually changes the dosing rate when applied to a live medicine', () => {
+    const w = new World({
+      start: at(0, '07:55'),
+      patient: {
+        morningPollAt: '08:00', eveningPollAt: '22:00',
+        presumedSleepAt: '23:00', presumedWakeAt: '09:00',
+        wakeState: 'awake', wakeConfidence: 'confirmed',
+        wakeStateSince: at(0, '08:00'), lastWakeAt: at(0, '08:00'),
+      },
+      meds: [makeMed({
+        id: 1, medKey: 'tablet', intervalMs: 7 * HOUR, minGapMs: 5 * HOUR,
+        spec: { kind: 'interval', intervalMs: 7 * HOUR, anchor: 'wake' },
+      })],
+      chats: [makeChat({ chatId: 100 })],
+    });
+    w.respectSchedule = true;
+
+    // Two a day at first.
+    for (let i = 0; i < 15 * 60; i++) {
+      w.tick();
+      const p = w.state.liveDoses.find((d) => d.status === 'prompted' || d.status === 'due');
+      if (p !== undefined) w.resolve(p.id, 'taken');
+      w.now += MINUTE;
+    }
+    const before = w.takenTimes('tablet').length;
+
+    // The doctor says make it four a day.
+    const med = w.med('tablet');
+    const ms = Math.round(((22 - 8) * 60 / 3) * MINUTE);
+    med.intervalMs = ms;
+    med.spec = { kind: 'interval', intervalMs: ms, anchor: 'wake' };
+    med.minGapMs = Math.floor(ms * 0.75);
+    w.state.liveDoses = [];
+    w.state.patient.nextActionAt = w.now;
+
+    w.now = at(1, '07:55');
+    w.state.patient.wakeStateSince = at(1, '08:00');
+    w.state.patient.lastWakeAt = at(1, '08:00');
+    for (let i = 0; i < 15 * 60; i++) {
+      w.tick();
+      const p = w.state.liveDoses.find((d) => d.status === 'prompted' || d.status === 'due');
+      if (p !== undefined) w.resolve(p.id, 'taken');
+      w.now += MINUTE;
+    }
+    const after = w.takenTimes('tablet').length - before;
+
+    expect(after, `${before} doses before, ${after} after the change`).toBeGreaterThan(before);
+  });
+});

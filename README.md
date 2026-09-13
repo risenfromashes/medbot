@@ -123,7 +123,8 @@ already gave up and logged that dose as missed. It'll correct the record and rec
 everything from the real time.
 
 **Changing things doesn't mean touching code.** `/edit drop_a every 3h`, `/extend drop_a 3d`,
-`/pause`, `/stop`, `/add`, or `/import` a whole new prescription. All from your phone.
+`/pause`, `/stop`, `/add`, or `/import` a whole new prescription — and `/meds` gives you
+buttons for most of it. All from your phone.
 
 ---
 

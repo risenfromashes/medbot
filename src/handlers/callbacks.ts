@@ -12,6 +12,7 @@ import { decodeCallback } from '../core/callbackCodec.js';
 import { renderConfirmation, renderEarlierMenu } from '../core/render.js';
 import { HOUR, MINUTE, fmtDuration, zoneFor } from '../core/tz.js';
 import { parseDuration } from '../core/timeparse.js';
+import { dosesPerDayInterval } from '../core/prescription.js';
 import { Db } from '../io/db.js';
 import { Telegram, esc } from '../io/telegram.js';
 import { broadcast, clearPromptMessages } from './dispatch.js';
@@ -317,6 +318,25 @@ async function applyEdit(
   if (med === null) return null;
 
   switch (field) {
+    case 'perday': {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1 || n > 12) return null;
+      const patient = await db.getPatient(med.patientId);
+      if (patient === null) return null;
+      const ms = dosesPerDayInterval(patient.morningPollAt, patient.eveningPollAt, n);
+      await db.updateMed(
+        medId,
+        {
+          intervalMs: ms,
+          minGapMs: Math.min(med.minGapMs, Math.floor(ms * 0.75)),
+          spec: { kind: 'interval', intervalMs: ms, anchor: 'wake' },
+        },
+        { rescheduleNow: true },
+        now,
+      );
+      await db.audit(med.patientId, 'med_edited', String(chatId), { medId, field, value }, now);
+      return `now ${n} time${n === 1 ? '' : 's'} a day`;
+    }
     case 'every': {
       const ms = parseDuration(value);
       if (ms === null || ms < 5 * MINUTE) return null;

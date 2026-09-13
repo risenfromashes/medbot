@@ -7,7 +7,7 @@
  */
 
 import type { Medicine, Patient } from '../core/domain.js';
-import { describeCourse, describeSchedule, hashString, parsePrescription } from '../core/prescription.js';
+import { describeCourse, describeSchedule, dosesPerDayInterval, hashString, parsePrescription } from '../core/prescription.js';
 import { PRESCRIPTION_PROMPT_PARTS } from '../core/promptText.js';
 import type { NormalizedPrescription } from '../core/prescription.js';
 import { renderConfirmation, renderEditMenu } from '../core/render.js';
@@ -973,6 +973,27 @@ async function cmdEdit(ctx: CmdCtx, args: string): Promise<void> {
   let reschedule = true;
 
   switch (field) {
+    case 'perday':
+    case 'daily':
+    case 'timesperday':
+    case 'times_per_day': {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1 || n > 12) {
+        await reply(ctx, 'How many doses a day? Give a whole number between 1 and 12.');
+        return;
+      }
+      // Spread across the patient's own waking window, so three a day means three across
+      // the day they actually have -- the same arithmetic an import would do.
+      const ms = dosesPerDayInterval(ap.patient.morningPollAt, ap.patient.eveningPollAt, n);
+      await ctx.db.updateMed(med.id, {
+        intervalMs: ms,
+        minGapMs: Math.min(med.minGapMs, Math.floor(ms * 0.75)),
+        spec: { kind: 'interval', intervalMs: ms, anchor: 'wake' },
+      }, { rescheduleNow: true }, ctx.now);
+      summary = `now ${n} time${n === 1 ? '' : 's'} a day (about every ${fmtDuration(ms)} while awake)`;
+      break;
+    }
+
     case 'every':
     case 'interval': {
       const ms = parseDuration(value);

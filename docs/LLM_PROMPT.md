@@ -89,19 +89,6 @@ it will say which medicine and which field, so you can go back and fix it.
 > you may write `"pattern": "1+0+1"` instead of a schedule.
 >
 > **Rules**
-> - **Assume medicines are taken while awake.** Do not add `"awake_only"` — that is the
->   default, and the bot fits doses into the patient's waking day rather than scheduling
->   one for the middle of the night.
->
->   Only add `"awake_only": false` if the prescription genuinely means round the clock —
->   wording like *"strictly every 6 hours, including at night"*. Add `"critical": true`
->   only when missing a night dose is actually dangerous, because that one wakes the
->   patient up.
->
->   Worth knowing: a strict six-hourly medicine only fits three doses into a waking day. If
->   a prescription says *four times a day* **and** *6-hourly*, it almost certainly means
->   four across the day — use `{"type": "times_per_day", "n": 4}` rather than a six-hour
->   interval, or the bot will quietly give three.
 > - Eye drops, or anything that must be spaced apart, all share the same `"group"`, with
 >   the gap declared once in `groups`. Ten minutes is usual unless stated otherwise.
 >   Grouped medicines **keep their own separate schedules and courses** — the group only
@@ -115,6 +102,10 @@ it will say which medicine and which field, so you can go back and fix it.
 >   wake the patient.
 > - If the prescription is ambiguous, choose the safer reading and say so in a `"notes"`
 >   field on that medicine.
+> - Unless the prescription explicitly says otherwise, doses are divided across the
+>   patient's waking hours, not the full 24. So "4 times a day, 6 hourly" means four doses
+>   across the day — prefer `{"type": "times_per_day", "n": 4}` over a six-hour interval.
+>   Add `"awake_only": false` only for genuine round-the-clock dosing.
 > - Use IDs that are short, lowercase and meaningful (`drop_a`, `stomach_capsule`, `painkiller`).
 
 ---

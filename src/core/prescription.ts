@@ -630,6 +630,22 @@ function parseSchedule(
   return null;
 }
 
+/**
+ * The interval that fits `n` doses across a waking window.
+ *
+ * Shared by the importer and by `/edit <med> perday 3`, so changing the number of doses
+ * from the bot lands on exactly the schedule an import of the same number would have
+ * produced. Two ways of computing it would eventually disagree.
+ */
+export function dosesPerDayInterval(from: string, to: string, n: number): number {
+  if (n <= 1) return 24 * HOUR;
+  const a = parseWall(from);
+  const b = parseWall(to);
+  let span = (b.h * 60 + b.mi) - (a.h * 60 + a.mi);
+  if (span <= 0) span += 24 * 60;
+  return Math.round((span / (n - 1)) * MINUTE);
+}
+
 function spreadTimes(from: string, to: string, n: number): string[] {
   const a = parseWall(from);
   const b = parseWall(to);

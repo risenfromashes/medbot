@@ -440,8 +440,14 @@ The full surface, all of which avoids ever editing code:
 ```
 
 Every `[time]` is optional and takes the retrospective formats above. `/meds` also puts an
-✏️ button beside each medicine that opens a tap-through editor — interval, spacing, pause,
-stop, extend — so the common mid-course changes need no remembered syntax.
+✏️ button beside each medicine that opens a tap-through editor — how many doses a day,
+interval, spacing, pause, stop, extend — so the common mid-course changes need no
+remembered syntax.
+
+`/edit <med> perday 3` is the one people reach for most: a doctor says "drop it to three
+times a day", not "make it every four hours and forty minutes". It spreads the doses across
+the patient's own waking window using exactly the arithmetic an import of "3 times a day"
+would have used — two implementations of that would eventually disagree.
 
 `/settings` covers the times that shape the day: when to start asking whether you are
 awake, when to give up and assume it, the same for bedtime, and when to send the digest.
