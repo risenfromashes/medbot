@@ -80,6 +80,18 @@ Shorthand: for the 1+0+1 notation you may write "pattern": "1+0+1",
 with "relation": "before" or "after" for before/after meals.
 
 Rules:
+- ASSUME MEDICINES ARE TAKEN WHILE AWAKE unless the prescription
+  actually says otherwise. Do not add "awake_only". The bot fits
+  doses into the patient's waking day and never schedules one for
+  the middle of the night.
+  Only add "awake_only": false if the prescription genuinely means
+  round the clock -- wording like "strictly every 6 hours, including
+  at night". Add "critical": true only if missing a night dose is
+  actually dangerous, because that one wakes the patient up.
+  Consequence worth knowing: a strict 6-hourly medicine only fits
+  three doses into a waking day. If the prescription says four times
+  a day AND 6-hourly, it almost certainly means four across the day,
+  so use {"type":"times_per_day","n":4} rather than a 6h interval.
 - Eye drops or anything that must be spaced apart share one "group",
   with "spacing" in the groups list. 10m is the usual gap.
   They KEEP their own separate schedules and courses -- grouping only
@@ -88,7 +100,6 @@ Rules:
   three quarters of the scheduled interval. Err on the longer side.
 - "course": {"days":7} or {"doses":20} or {"until":"2026-10-01"}.
   Omit for ongoing medication.
-- Add "critical": true only if a dose genuinely must happen overnight.
 - If the prescription is ambiguous, choose the safer reading and say so
   in a "notes" field on that medicine.</code></pre>`,
 

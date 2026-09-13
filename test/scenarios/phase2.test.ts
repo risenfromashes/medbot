@@ -143,6 +143,17 @@ describe('the prescription prompt the bot hands out', () => {
     }
   });
 
+  it('tells the chatbot that medicines are taken while awake by default', () => {
+    // Without this the generated JSON pins night doses that the bot will then push to
+    // the morning anyway, or -- worse -- encodes a six-hourly interval for something the
+    // prescription says is four times a day, which quietly under-doses it.
+    const all = PRESCRIPTION_PROMPT_PARTS.join('\n').toLowerCase();
+    expect(all).toContain('awake');
+    expect(all, 'never mentions the awake_only escape hatch').toContain('awake_only');
+    expect(all, 'does not warn about the six-hourly trap').toMatch(/6.hourly|six.hourly/);
+    expect(all).toContain('times_per_day');
+  });
+
   it('describes every schedule type the parser actually accepts', () => {
     const all = PRESCRIPTION_PROMPT_PARTS.join('\n');
     for (const kind of ['interval', 'fixed_times', 'times_per_day', 'meal', 'as_needed']) {
