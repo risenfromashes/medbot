@@ -12,6 +12,52 @@ noise rather than towards silence.
 
 ---
 
+## How a day goes
+
+The whole loop, in one place.
+
+**You wake up.** Either you say so, or the bot infers it from any message you send, or --
+if it has heard nothing by a fallback time you set -- it presumes you are up and starts
+anyway. That instant becomes the day's anchor.
+
+**The drops start immediately.** Anything anchored on waking is due right then, not at some
+clock time. Medicines that must be spaced apart are staggered behind it -- first drop now,
+second ten minutes after you actually take the first, third ten minutes after that.
+
+**It nags.** Every reminder repeats at 10, 15, 20, then every 30 minutes, with the wording
+escalating and the previous message deleted so the chat stays readable. It does not give
+up. If you have a backup person, anything you have ignored for five minutes goes to them
+too, and they can answer for you.
+
+**You answer, whenever.** Tap Taken, or say `/took antibiotic drop 5pm` if you took it earlier and
+forgot, or log it before the bot has even asked. Either way the next dose is measured from
+when you actually took it -- absorbing small lateness so the day does not drift, re-basing
+on the real time when you were properly late.
+
+**Meals get proposed, not assumed.** A while after waking the bot suggests a time -- "having
+breakfast around 09:15?" -- far enough ahead that the tablet due half an hour before food
+still has its half hour. One tap to agree, one to push it back. Tablets tied to that meal
+move with your answer, and the reminder says why: "you said breakfast in about 30 minutes,
+this one goes before it." At the proposed time it asks whether you are actually eating,
+which releases anything due after the meal.
+
+**Nothing waits for ever.** An unanswered dose rolls forward when the next one falls due,
+so one ignored reminder can never freeze a medicine. An unanswered meal is presumed after a
+couple of hours. A skipped meal resolves whatever depended on it.
+
+**Evening.** It asks whether you have gone to bed, and sends a short summary of the day --
+taken, missed, how far through each course. If that summary stops arriving, something is
+wrong, and that is the cheapest way for a person to notice.
+
+**You sleep.** Non-critical reminders stop, and a dose that came due overnight is parked --
+exactly one, not one per missed interval -- and re-raised when you get up. Medicines marked
+critical still wake you.
+
+Then the loop starts again from whenever you happen to wake, which may be nothing like
+today.
+
+---
+
 ## Scheduling
 
 ### Waking up

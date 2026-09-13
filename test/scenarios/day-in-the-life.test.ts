@@ -287,3 +287,104 @@ describe('a full day, end to end', () => {
     }
   });
 });
+
+describe('eye drops the moment she is up', () => {
+  it('asks for the first drop within a minute of waking, not later', () => {
+    const w = newDay();
+    w.run(7 * HOUR);               // asleep all morning, answering nothing
+
+    w.now = at(0, '12:00');
+    w.declare('wake');
+    w.run(3 * MINUTE);
+
+    const firstDrop = w.sent.find(
+      (s) => s.kind === 'dose' && s.at >= at(0, '12:00') &&
+        s.doseIds.some((id) => {
+          const d = w.allDoses.find((x) => x.id === id);
+          const m = d === undefined ? undefined : w.state.meds.find((mm) => mm.id === d.medId);
+          return m?.spacingGroup === 'eye_drops';
+        }),
+    );
+    expect(firstDrop, 'no eye drop was asked for after waking').toBeDefined();
+    expect(
+      firstDrop!.at - at(0, '12:00'),
+      'the first drop was not asked for promptly after waking',
+    ).toBeLessThanOrEqual(MINUTE);
+  });
+
+  it('staggers the other two behind it rather than asking all at once', () => {
+    const w = newDay();
+    w.run(7 * HOUR);
+    w.now = at(0, '12:00');
+    w.declare('wake');
+    w.run(5 * MINUTE);
+
+    const drops = w.state.liveDoses
+      .filter((d) => w.state.meds.find((m) => m.id === d.medId)?.spacingGroup === 'eye_drops')
+      .map((d) => d.effectiveDueAt)
+      .sort((a, b) => a - b);
+
+    expect(drops.length).toBe(3);
+    expect(drops[0]! - at(0, '12:00')).toBeLessThanOrEqual(MINUTE);
+    for (let i = 1; i < drops.length; i++) {
+      expect(drops[i]! - drops[i - 1]!).toBeGreaterThanOrEqual(10 * MINUTE);
+    }
+  });
+
+  it('keeps nagging about the first drop if she ignores it', () => {
+    const w = newDay();
+    w.run(7 * HOUR);
+    w.now = at(0, '12:00');
+    w.declare('wake');
+    w.run(75 * MINUTE);            // ignore everything
+
+    const nudges = w.sent.filter((s) => s.nudge && s.at > at(0, '12:00'));
+    expect(nudges.length, 'she was left alone after ignoring the first drop').toBeGreaterThanOrEqual(3);
+    for (let i = 1; i < nudges.length; i++) {
+      expect(nudges[i]!.at - nudges[i - 1]!.at).toBeLessThanOrEqual(31 * MINUTE);
+    }
+  });
+
+  it('works the same on an ordinary morning, not just a late one', () => {
+    const w = newDay({ start: at(0, '06:00') });
+    w.now = at(0, '06:45');
+    w.declare('wake');
+    w.run(3 * MINUTE);
+
+    const firstDrop = w.sent.find((s) => s.kind === 'dose' && s.at >= at(0, '06:45'));
+    expect(firstDrop, 'nothing was asked for on waking').toBeDefined();
+    expect(firstDrop!.at - at(0, '06:45')).toBeLessThanOrEqual(MINUTE);
+  });
+});
+
+describe('the safety floor still applies on waking', () => {
+  it('waits out the minimum gap if the last dose was very late the night before', () => {
+    const w = newDay({ start: at(0, '02:00') });
+    w.now = at(0, '02:00');
+    w.declare('wake');
+    w.run(2 * MINUTE);
+
+    // A drop at 02:00, then straight back to sleep, up again at 04:00.
+    const pending = w.state.liveDoses.find(
+      (d) => w.state.meds.find((m) => m.id === d.medId)?.medKey === 'drop',
+    );
+    if (pending !== undefined) w.resolve(pending.id, 'taken');
+
+    w.now = at(0, '02:05');
+    w.declare('sleep');
+    w.now = at(0, '04:00');
+    w.declare('wake');
+    w.run(5 * MINUTE);
+
+    const next = w.state.liveDoses.find(
+      (d) => w.state.meds.find((m) => m.id === d.medId)?.medKey === 'drop',
+    );
+    expect(next, 'the drop disappeared entirely').toBeDefined();
+    // Waking does not override the minimum gap -- that is the one rule nothing may break.
+    const minGap = w.med('drop').minGapMs;
+    expect(
+      next!.effectiveDueAt,
+      'waking up was allowed to short-circuit the safety gap',
+    ).toBeGreaterThanOrEqual(at(0, '02:00') + minGap);
+  });
+});

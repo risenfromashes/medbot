@@ -24,6 +24,25 @@ credit card, no server, no monthly bill.
 
 ---
 
+## A day with it
+
+You wake up and say so — or it works it out from any message you send, or gives up waiting
+and starts anyway. **The eye drops are due right then**, not at eight o'clock because eight
+o'clock is when someone decided breakfast happens. The second drop comes ten minutes after
+you actually take the first.
+
+It keeps asking until you answer. If you don't, it asks whoever's backing you up.
+
+Some time later it proposes breakfast — *"having breakfast around 09:15?"* — early enough
+that the tablet due half an hour beforehand still has its half hour. Agree, or push it
+back; the tablets move with you.
+
+Took something and forgot to tap? Tell it when, even hours later, even if it had already
+written that dose off. It fixes the record and recalculates from the real time.
+
+In the evening it asks if you're off to bed, sends a short summary of the day, and goes
+quiet until morning.
+
 ## Who it's for
 
 Anyone on a course of medicine fiddly enough that you keep losing track — post-surgery eye
