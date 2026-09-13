@@ -1,0 +1,157 @@
+/**
+ * A thin Telegram Bot API client. No framework, no dependencies -- the whole surface we
+ * need is six methods, and keeping it to raw fetch keeps cold-start CPU well inside the
+ * free plan's 10ms budget.
+ */
+
+export interface InlineButton {
+  text: string;
+  callback_data: string;
+}
+
+export interface SendOptions {
+  replyMarkup?: { inline_keyboard: InlineButton[][] };
+  disableNotification?: boolean;
+}
+
+export interface TgResult<T> {
+  ok: boolean;
+  result?: T;
+  error?: string;
+  errorCode?: number;
+  retryAfter?: number;
+}
+
+export interface TgMessage {
+  message_id: number;
+  chat: { id: number };
+}
+
+export class Telegram {
+  /** Every outbound call passes through here, so the subrequest budget has one place to live. */
+  private calls = 0;
+
+  constructor(
+    private readonly token: string,
+    private readonly maxCalls = 40,
+  ) {}
+
+  get callsUsed(): number {
+    return this.calls;
+  }
+
+  get exhausted(): boolean {
+    return this.calls >= this.maxCalls;
+  }
+
+  private async call<T>(method: string, body: Record<string, unknown>): Promise<TgResult<T>> {
+    // A Worker invocation may make at most 50 subrequests. Refusing here rather than
+    // throwing means the tick finishes cleanly and the unsent work is simply picked up
+    // next minute -- the same self-healing property that makes a dropped cron harmless.
+    if (this.calls >= this.maxCalls) {
+      return { ok: false, error: 'subrequest budget exhausted' };
+    }
+    this.calls++;
+
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = (await res.json()) as {
+        ok: boolean;
+        result?: T;
+        description?: string;
+        error_code?: number;
+        parameters?: { retry_after?: number };
+      };
+      if (json.ok) return { ok: true, ...(json.result !== undefined ? { result: json.result } : {}) };
+      return {
+        ok: false,
+        error: json.description ?? `HTTP ${res.status}`,
+        ...(json.error_code !== undefined ? { errorCode: json.error_code } : {}),
+        ...(json.parameters?.retry_after !== undefined ? { retryAfter: json.parameters.retry_after } : {}),
+      };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  sendMessage(chatId: number, text: string, opts: SendOptions = {}): Promise<TgResult<TgMessage>> {
+    return this.call<TgMessage>('sendMessage', {
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true },
+      ...(opts.replyMarkup !== undefined ? { reply_markup: opts.replyMarkup } : {}),
+      ...(opts.disableNotification === true ? { disable_notification: true } : {}),
+    });
+  }
+
+  editMessageText(
+    chatId: number,
+    messageId: number,
+    text: string,
+    opts: SendOptions = {},
+  ): Promise<TgResult<TgMessage>> {
+    return this.call<TgMessage>('editMessageText', {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true },
+      reply_markup: opts.replyMarkup ?? { inline_keyboard: [] },
+    });
+  }
+
+  deleteMessage(chatId: number, messageId: number): Promise<TgResult<boolean>> {
+    return this.call<boolean>('deleteMessage', { chat_id: chatId, message_id: messageId });
+  }
+
+  answerCallbackQuery(id: string, text?: string, alert = false): Promise<TgResult<boolean>> {
+    return this.call<boolean>('answerCallbackQuery', {
+      callback_query_id: id,
+      ...(text !== undefined ? { text } : {}),
+      show_alert: alert,
+    });
+  }
+
+  setWebhook(url: string, secret: string): Promise<TgResult<boolean>> {
+    return this.call<boolean>('setWebhook', {
+      url,
+      secret_token: secret,
+      allowed_updates: ['message', 'callback_query'],
+      drop_pending_updates: false,
+    });
+  }
+
+  getWebhookInfo(): Promise<TgResult<{ url: string; last_error_message?: string }>> {
+    return this.call('getWebhookInfo', {});
+  }
+
+  setMyCommands(commands: Array<{ command: string; description: string }>): Promise<TgResult<boolean>> {
+    return this.call<boolean>('setMyCommands', { commands });
+  }
+
+  getFile(fileId: string): Promise<TgResult<{ file_path: string }>> {
+    return this.call('getFile', { file_id: fileId });
+  }
+
+  async downloadFile(filePath: string): Promise<string | null> {
+    if (this.calls >= this.maxCalls) return null;
+    this.calls++;
+    try {
+      const res = await fetch(`https://api.telegram.org/file/bot${this.token}/${filePath}`);
+      if (!res.ok) return null;
+      return await res.text();
+    } catch {
+      return null;
+    }
+  }
+}
+
+/** Telegram truncates HTML it cannot parse, so escape anything user- or prescription-supplied. */
+export function esc(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}

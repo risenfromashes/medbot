@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "medbot prescription",
+  "type": "object",
+  "required": [
+    "medicines"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "patient": {
+      "type": "string"
+    },
+    "timezone": {
+      "type": "string",
+      "description": "IANA zone, e.g. Asia/Dhaka"
+    },
+    "day": {
+      "type": "object",
+      "properties": {
+        "morning_poll_at": {
+          "type": "string",
+          "pattern": "^[0-9]{1,2}:[0-9]{2}$"
+        },
+        "presumed_wake_at": {
+          "type": "string",
+          "pattern": "^[0-9]{1,2}:[0-9]{2}$"
+        },
+        "evening_poll_at": {
+          "type": "string",
+          "pattern": "^[0-9]{1,2}:[0-9]{2}$"
+        },
+        "presumed_sleep_at": {
+          "type": "string",
+          "pattern": "^[0-9]{1,2}:[0-9]{2}$"
+        },
+        "digest_at": {
+          "type": "string",
+          "pattern": "^[0-9]{1,2}:[0-9]{2}$"
+        }
+      }
+    },
+    "meals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "typical_local": {
+            "type": "string"
+          },
+          "ask_after_local": {
+            "type": "string"
+          },
+          "presume_at_local": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "spacing": {
+            "type": "string",
+            "description": "e.g. 10m"
+          },
+          "ordered": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "medicines": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "dose": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Shorthand such as 1+0+1"
+          },
+          "schedule": {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "enum": [
+                  "interval",
+                  "fixed_times",
+                  "times_per_day",
+                  "meal",
+                  "as_needed"
+                ]
+              },
+              "every": {
+                "type": "string"
+              },
+              "anchor": {
+                "enum": [
+                  "wake",
+                  "clock"
+                ]
+              },
+              "times": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "n": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              },
+              "meals": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "relation": {
+                "enum": [
+                  "before",
+                  "after",
+                  "with"
+                ]
+              },
+              "offset": {
+                "type": "string"
+              }
+            }
+          },
+          "min_gap": {
+            "type": "string"
+          },
+          "onset_offset": {
+            "type": "string"
+          },
+          "max_per_day": {
+            "type": "integer"
+          },
+          "awake_only": {
+            "type": "boolean"
+          },
+          "critical": {
+            "type": "boolean"
+          },
+          "drift_policy": {
+            "enum": [
+              "absorb",
+              "strict_actual",
+              "strict_grid"
+            ]
+          },
+          "drift_tolerance": {
+            "type": "string"
+          },
+          "group": {
+            "type": "string"
+          },
+          "group_seq": {
+            "type": "integer"
+          },
+          "mergeable": {
+            "type": "boolean"
+          },
+          "course": {
+            "type": "object",
+            "properties": {
+              "days": {
+                "type": "integer"
+              },
+              "doses": {
+                "type": "integer"
+              },
+              "until": {
+                "type": "string"
+              }
+            }
+          },
+          "nag": {
+            "type": "object",
+            "properties": {
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "escalate_after": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

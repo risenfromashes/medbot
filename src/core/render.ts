@@ -1,0 +1,183 @@
+/**
+ * Turning state into the words the bot actually says.
+ *
+ * Pure, so message copy is unit-testable and the planner stays free of presentation.
+ * The tone is deliberately warm and a little persistent -- this thing is going to be in
+ * someone's pocket every two hours for a fortnight, and a curt robot gets muted.
+ */
+
+import type { Dose, Medicine, Prompt } from './domain.js';
+import type { InlineButton } from '../io/telegram.js';
+import { encodeCallback } from './callbackCodec.js';
+import { esc } from '../io/telegram.js';
+import type { Zone } from './tz.js';
+import { MINUTE, fmtDuration, fmtTime12 } from './tz.js';
+
+export interface Rendered {
+  text: string;
+  buttons: InlineButton[][];
+}
+
+/** Escalating nudge wording. Gentle first, plainer later; never scolding. */
+function overdueLine(nudge: number, overdueMs: number, z: Zone, dueAt: number): string {
+  if (nudge === 0) return '';
+  if (nudge === 1) return `\n<i>Still waiting on this one — due at ${z.fmtTime12(dueAt)}.</i>`;
+  return `\n⚠️ <i>${fmtDuration(overdueMs)} overdue</i> — due at ${z.fmtTime12(dueAt)}.`;
+}
+
+export function renderDosePrompt(
+  prompt: Prompt,
+  doses: Dose[],
+  meds: Map<number, Medicine>,
+  z: Zone,
+  now: number,
+  opts: { forCaregiver?: boolean; patientName?: string } = {},
+): Rendered {
+  const items = doses
+    .map((d) => ({ dose: d, med: meds.get(d.medId) }))
+    .filter((x): x is { dose: Dose; med: Medicine } => x.med !== undefined);
+
+  if (items.length === 0) return { text: 'Nothing to take right now.', buttons: [] };
+
+  const first = items[0]!;
+  const dueAt = Math.min(...items.map((i) => i.dose.effectiveDueAt));
+  const overdue = Math.max(0, now - dueAt);
+
+  const who = opts.forCaregiver === true ? `${esc(opts.patientName ?? 'They')} ` : '';
+  const lines: string[] = [];
+
+  if (items.length === 1) {
+    const { dose, med } = first;
+    const step = med.steps[dose.step];
+    const label = step !== undefined ? step.name : med.name;
+    const doseText = step?.dose ?? med.doseText;
+
+    if (med.steps.length > 1) {
+      // A spacing group: say where we are in the sequence, because that is the whole
+      // reason these arrive as separate messages ten minutes apart.
+      lines.push(
+        opts.forCaregiver === true
+          ? `💧 ${who}hasn't confirmed <b>${esc(label)}</b> (drop ${dose.step + 1} of ${med.steps.length}).`
+          : `💧 <b>${esc(label)}</b> — drop ${dose.step + 1} of ${med.steps.length}`,
+      );
+    } else {
+      lines.push(
+        opts.forCaregiver === true
+          ? `💊 ${who}hasn't confirmed <b>${esc(label)}</b>.`
+          : `💊 Time for <b>${esc(label)}</b>`,
+      );
+    }
+    if (doseText !== null && doseText !== undefined) lines.push(esc(doseText));
+    const note = step?.note ?? med.notes;
+    if (note !== null && note !== undefined) lines.push(`<i>${esc(note)}</i>`);
+  } else {
+    lines.push(opts.forCaregiver === true ? `💊 ${who}hasn't confirmed these:` : '💊 Time for these:');
+    for (const { dose, med } of items) {
+      const step = med.steps[dose.step];
+      const label = step !== undefined ? step.name : med.name;
+      const doseText = step?.dose ?? med.doseText;
+      lines.push(`• <b>${esc(label)}</b>${doseText != null ? ` — ${esc(doseText)}` : ''}`);
+    }
+  }
+
+  lines.push(overdueLine(prompt.nudgeCount, overdue, z, dueAt));
+
+  const buttons: InlineButton[][] = [];
+  if (items.length === 1) {
+    buttons.push([
+      { text: '✅ Taken', callback_data: encodeCallback({ a: 'take', doseId: first.dose.id }) },
+      { text: '⏰ 15 min', callback_data: encodeCallback({ a: 'snooze', doseId: first.dose.id, minutes: 15 }) },
+    ]);
+    buttons.push([
+      { text: '🕐 Taken earlier…', callback_data: encodeCallback({ a: 'earlier', doseId: first.dose.id, minutesAgo: 30 }) },
+      { text: '⏭ Skip', callback_data: encodeCallback({ a: 'skip', doseId: first.dose.id }) },
+    ]);
+  } else {
+    buttons.push([{ text: '✅ All taken', callback_data: encodeCallback({ a: 'takeAll', promptId: prompt.id }) }]);
+    for (const { dose, med } of items) {
+      const step = med.steps[dose.step];
+      buttons.push([
+        { text: `✅ ${(step?.name ?? med.name).slice(0, 28)}`, callback_data: encodeCallback({ a: 'take', doseId: dose.id }) },
+      ]);
+    }
+  }
+
+  return { text: lines.filter((l) => l !== '').join('\n'), buttons };
+}
+
+/** The one-tap "I took it a while ago" menu. */
+export function renderEarlierMenu(doseId: number, z: Zone, now: number): Rendered {
+  const choices = [5, 15, 30, 60, 120];
+  return {
+    text:
+      '🕐 <b>When did you take it?</b>\n' +
+      `<i>Or just type</i> <code>/took &lt;medicine&gt; 5pm</code> <i>for an exact time.</i>`,
+    buttons: [
+      choices.slice(0, 3).map((m) => ({
+        text: `${fmtDuration(m * MINUTE)} ago`,
+        callback_data: encodeCallback({ a: 'earlier', doseId, minutesAgo: m }),
+      })),
+      choices.slice(3).map((m) => ({
+        text: `${fmtDuration(m * MINUTE)} ago (${fmtTime12(now - m * MINUTE, z.tz)})`,
+        callback_data: encodeCallback({ a: 'earlier', doseId, minutesAgo: m }),
+      })),
+      [{ text: '✅ Just now', callback_data: encodeCallback({ a: 'take', doseId }) }],
+    ],
+  };
+}
+
+export function renderWakePrompt(nudge: number, forCaregiver: boolean, patientName: string): Rendered {
+  const text = forCaregiver
+    ? `☀️ ${esc(patientName)} hasn't confirmed being awake yet — today's medicines are waiting on it.`
+    : nudge === 0
+      ? "☀️ <b>Good morning!</b> Are you up?\nI'll start today's medicine schedule as soon as you say so."
+      : "☀️ Still asleep? Tap below whenever you're up and I'll start the day.";
+  return {
+    text,
+    buttons: [[{ text: "☀️ I'm awake", callback_data: encodeCallback({ a: 'wake' }) }]],
+  };
+}
+
+export function renderSleepPrompt(forCaregiver: boolean, patientName: string): Rendered {
+  return {
+    text: forCaregiver
+      ? `🌙 ${esc(patientName)} hasn't turned in yet.`
+      : "🌙 Heading to bed? Let me know and I'll stop bothering you until morning.",
+    buttons: [[{ text: '🌙 Going to sleep', callback_data: encodeCallback({ a: 'sleep' }) }]],
+  };
+}
+
+export function renderMealPrompt(meal: string, forCaregiver: boolean, patientName: string): Rendered {
+  const nice = meal.charAt(0).toUpperCase() + meal.slice(1);
+  return {
+    text: forCaregiver
+      ? `🍽 ${esc(patientName)} hasn't confirmed ${esc(meal)} yet.`
+      : `🍽 Have you had ${esc(meal)}?`,
+    buttons: [
+      [
+        { text: `✅ Had ${nice.toLowerCase()}`, callback_data: encodeCallback({ a: 'ate', meal }) },
+        { text: '⏭ Skipping it', callback_data: encodeCallback({ a: 'skipMeal', meal }) },
+      ],
+    ],
+  };
+}
+
+/** The short line every linked chat gets once someone answers. */
+export function renderConfirmation(
+  medLabel: string,
+  takenAt: number,
+  z: Zone,
+  byName: string | null,
+  corrected: boolean,
+): string {
+  const when = z.fmtTime12(takenAt);
+  const by = byName !== null ? `, confirmed by ${esc(byName)}` : '';
+  return corrected
+    ? `✅ <b>${esc(medLabel)}</b> — recorded as taken at ${when}${by}. Schedule updated.`
+    : `✅ <b>${esc(medLabel)}</b> — taken ${when}${by}`;
+}
+
+/** A collapsed one-liner replacing a superseded nudge, so the chat stays readable. */
+export function renderCollapsed(medLabel: string, z: Zone, dueAt: number): string {
+  return `<i>💊 ${esc(medLabel)} — reminder from ${z.fmtTime12(dueAt)}</i>`;
+}

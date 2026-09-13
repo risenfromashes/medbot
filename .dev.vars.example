@@ -1,0 +1,15 @@
+# Copy to .dev.vars for local development, or set as Worker secrets in production:
+#   npx wrangler secret put TELEGRAM_BOT_TOKEN
+#   npx wrangler secret put WEBHOOK_SECRET
+#   npx wrangler secret put JOIN_CODE
+
+# From @BotFather on Telegram.
+TELEGRAM_BOT_TOKEN=123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Any random string, 1-256 chars of A-Z a-z 0-9 _ - . Telegram echoes it back on every
+# webhook call so the Worker can prove the request really came from Telegram.
+# Generate one with:  openssl rand -hex 32
+WEBHOOK_SECRET=replace-me-with-a-long-random-string
+
+# Anyone who sends this code to the bot can link their chat. Keeps strangers out.
+JOIN_CODE=replace-me-too
