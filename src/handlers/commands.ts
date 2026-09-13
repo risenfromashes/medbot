@@ -15,6 +15,7 @@ import { parseDuration, parseTime, splitTrailingTime } from '../core/timeparse.j
 import { MINUTE, fmtDuration, isValidTimeZone, zoneFor } from '../core/tz.js';
 import type { Zone } from '../core/tz.js';
 import { Db } from '../io/db.js';
+import { AdminDb } from '../io/adminDb.js';
 import { Telegram, esc } from '../io/telegram.js';
 import type { Env, TgIncomingMessage } from '../types.js';
 import { broadcast, clearPromptMessages } from './dispatch.js';
@@ -140,11 +141,40 @@ async function cmdStart(ctx: CmdCtx, args: string): Promise<void> {
     return;
   }
 
-  const required = ctx.env.JOIN_CODE;
-  if (required !== undefined && required !== '' && args.trim() !== required) {
+  const code = args.trim().split(/\s+/)[0] ?? '';
+  if (code === '') {
     await reply(
       ctx,
-      '🔒 This bot is private.\n\nSend <code>/start &lt;join code&gt;</code> with the code from whoever set it up.',
+      "🔒 <b>This bot is private.</b>\n\nYou need an invite code from whoever runs it:\n" +
+        '<code>/start ABCD1234</code>',
+    );
+    return;
+  }
+
+  // Single use and expiring, rather than one fixed password that would let anyone in
+  // forever once it leaked.
+  const adb = new AdminDb(ctx.env.MEDBOT_DB);
+  const result = await adb.redeemInvite(code, ctx.chatId, ctx.now);
+  if (!result.ok) {
+    const why =
+      result.reason === 'used' ? 'That code has already been used.'
+      : result.reason === 'expired' ? 'That code has expired.'
+      : 'That code is not valid.';
+    await reply(ctx, `🔒 ${why}\n\nAsk for a fresh one — each code works once.`);
+    return;
+  }
+
+  const invite = result.invite!;
+
+  if (invite.kind === 'caregiver' && invite.patientId !== null) {
+    const patient = await ctx.db.getPatient(invite.patientId);
+    const delay = invite.escalateAfterMs ?? 5 * MINUTE;
+    await ctx.db.linkChat(ctx.chatId, invite.patientId, 'caregiver', 1, delay, ctx.now);
+    await reply(
+      ctx,
+      `✅ You're now the backup for <b>${esc(patient?.displayName ?? 'them')}</b>.\n\n` +
+        `If they don't answer a reminder within ${fmtDuration(delay)} — medicines, meals, waking up, ` +
+        "going to bed — I'll ask you instead, and you can answer on their behalf. Otherwise I'll leave you alone.",
     );
     return;
   }
@@ -163,36 +193,37 @@ async function cmdStart(ctx: CmdCtx, args: string): Promise<void> {
   );
 }
 
-/**
- * Mint a short code the patient can hand to whoever should back them up.
- *
- * Deliberately a code rather than a chat id: it means the patient decides who watches
- * them, and the caregiver does not have to know anything technical.
- */
 async function cmdInvite(ctx: CmdCtx): Promise<void> {
   const ap = await activePatient(ctx);
   if (ap === null) return needsSetup(ctx);
 
-  // Six characters from an alphabet with no 0/O or 1/I, because this gets read aloud.
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const bytes = crypto.getRandomValues(new Uint8Array(6));
-  let code = '';
-  for (const b of bytes) code += alphabet[b % alphabet.length];
+  const adb = new AdminDb(ctx.env.MEDBOT_DB);
+  const invite = await adb.createInvite(
+    'caregiver',
+    {
+      patientId: ap.patient.id,
+      label: ap.patient.displayName,
+      escalateAfterMs: 5 * MINUTE,
+      createdBy: String(ctx.chatId),
+      ttlMs: 24 * 60 * MINUTE,
+    },
+    ctx.now,
+  );
 
-  await ctx.db.kvSet(`invite:${code}`, String(ap.patient.id));
   await reply(
     ctx,
-    `<b>Backup code: <code>${code}</code></b>\n\n` +
+    `<b>Backup code: <code>${invite.code}</code></b>\n\n` +
       'Send that to whoever should look after you. They open this bot and send:\n' +
-      `<code>/caregiver ${code} 5m</code>\n\n` +
+      `<code>/start ${invite.code}</code>\n\n` +
       "They'll then get any reminder you haven't answered within five minutes — medicines, meals, " +
-      'waking up, going to bed — and they can answer on your behalf. Change <code>5m</code> to whatever delay suits.',
+      'waking up, going to bed — and they can answer on your behalf.\n\n' +
+      '<i>Single use, expires in 24 hours.</i>',
   );
 }
 
 async function cmdCaregiver(ctx: CmdCtx, args: string): Promise<void> {
-  const parts = args.split(/\s+/).filter((p) => p !== '');
-  const code = parts[0] ?? '';
+  const code = args.trim().split(/\s+/)[0] ?? '';
+
   if (code === '') {
     const links = await ctx.db.linksForChat(ctx.chatId);
     const lines = await Promise.all(
@@ -204,26 +235,37 @@ async function cmdCaregiver(ctx: CmdCtx, args: string): Promise<void> {
     await reply(
       ctx,
       (lines.length > 0 ? `You are linked to:\n${lines.join('\n')}\n\n` : 'This chat is not linked to anyone yet.\n\n') +
-        'To become someone\'s backup, ask them to run <code>/invite</code> and send you the code, then run:\n' +
-        '<code>/caregiver &lt;code&gt; [delay]</code>  e.g. <code>/caregiver AB12CD 5m</code>',
+        "To become someone's backup, ask them to run <code>/invite</code>, then send me the code:\n" +
+        '<code>/caregiver ABCD1234</code>',
     );
     return;
   }
 
-  const target = await ctx.db.kvGet(`invite:${code.toUpperCase()}`);
-  if (target === null) {
-    await reply(ctx, 'That invite code is not valid. Ask them to run /invite again.');
+  const adb = new AdminDb(ctx.env.MEDBOT_DB);
+  const result = await adb.redeemInvite(code, ctx.chatId, ctx.now);
+  if (!result.ok) {
+    const why =
+      result.reason === 'used' ? 'That code has already been used.'
+      : result.reason === 'expired' ? 'That code has expired.'
+      : 'That code is not valid.';
+    await reply(ctx, `${why} Ask them to run /invite again — each code works once.`);
     return;
   }
-  const delay = parts[1] !== undefined ? (parseDuration(parts[1]) ?? 5 * MINUTE) : 5 * MINUTE;
-  const patientId = Number(target);
-  const patient = await ctx.db.getPatient(patientId);
-  await ctx.db.linkChat(ctx.chatId, patientId, 'caregiver', 1, delay, ctx.now);
+
+  const invite = result.invite!;
+  if (invite.kind !== 'caregiver' || invite.patientId === null) {
+    await reply(ctx, 'That code is for joining as a new member. Send <code>/start ' + esc(code) + '</code> instead.');
+    return;
+  }
+
+  const delay = invite.escalateAfterMs ?? 5 * MINUTE;
+  const patient = await ctx.db.getPatient(invite.patientId);
+  await ctx.db.linkChat(ctx.chatId, invite.patientId, 'caregiver', 1, delay, ctx.now);
   await reply(
     ctx,
     `✅ You're now the backup for <b>${esc(patient?.displayName ?? 'them')}</b>.\n\n` +
-      `If they don't answer a reminder within ${fmtDuration(delay)} — medicines, meals, waking up, going to bed — ` +
-      "I'll tell you, and you can answer on their behalf. Otherwise I'll leave you alone.",
+      `If they don't answer within ${fmtDuration(delay)} — medicines, meals, waking up, going to bed — ` +
+      "I'll ask you instead, and you can answer on their behalf. Otherwise I'll leave you alone.",
   );
 }
 

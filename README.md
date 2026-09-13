@@ -14,6 +14,8 @@ that you still haven't confirmed the six o'clock one.
 - **Your prescription lives in JSON, not in the code.** Change it from your phone.
 - **Shared, with escalation.** If the patient doesn't answer in five minutes, someone else
   gets asked.
+- **An admin dashboard** for whoever organises the household — read-only, on the same
+  deployment, no extra hosting.
 
 > ⚠️ **This is a reminder, not a medical device.** It can fail — phones get muted, networks
 > drop, bugs exist. Don't rely on it as the only safeguard for anything critical, and
@@ -85,7 +87,7 @@ npx wrangler deploy
 
 Generate the random strings with `openssl rand -hex 32` if you like.
 
-### 3. Connect it to Telegram
+### 3. Connect it to Telegram, and get your admin password
 
 Open this once in a browser, using the `WEBHOOK_SECRET` you just set:
 
@@ -93,15 +95,21 @@ Open this once in a browser, using the `WEBHOOK_SECRET` you just set:
 https://medbot.<your-subdomain>.workers.dev/setup?key=<WEBHOOK_SECRET>
 ```
 
-That registers the webhook and publishes the command menu. (If you ever forget, the bot
-re-checks its own webhook hourly and fixes it.)
+That registers the webhook, publishes the command menu, and creates the single admin
+account. **It shows you a generated password exactly once** — save it. There is no
+recovery: the only way to get a new one is to reset the account.
 
-### 4. Say hello
+### 4. Sign in and invite yourself
+
+Go to `https://medbot.<your-subdomain>.workers.dev/app` and sign in as `admin`. Change the
+password, then use the join code on the overview page.
+
+### 5. Say hello
 
 In Telegram, send your bot:
 
 ```
-/start <your JOIN_CODE>
+/start <the join code from the dashboard>
 /tz Asia/Dhaka
 /import
 ```
@@ -111,16 +119,21 @@ prompt you can give any AI chatbot along with a photo of your prescription — t
 easy way to produce it. The bot shows you exactly what would change and waits for you to
 confirm.
 
-### 5. Add your backup person
+### 6. Add your backup person
 
-You run `/invite` and get a code. They open the bot and send `/caregiver <code> 5m`. From
-then on, anything you haven't answered within five minutes goes to them too.
+Either mint a caregiver code in the dashboard, or send `/invite` in Telegram. Give them the
+code; they open the bot and send `/start <code>`. From then on, anything you haven't
+answered within five minutes goes to them too.
+
+Invite codes are **single use and expire in 24 hours** — there is no permanent password
+that opens your deployment forever.
 
 ---
 
 ## Using it
 
 ```
+/start <code>      join, using an invite code
 /status            what's waiting, what's next
 /awake  /sleep     start and end your day (accepts a past time: /awake 6:30am)
 /ate lunch         meal-timed medicines need this
@@ -140,6 +153,47 @@ then on, anything you haven't answered within five minutes goes to them too.
 Most of the time you just tap the buttons on the reminder.
 
 ---
+
+## The dashboard
+
+At `/app`, for whoever organises the household. One account, created at setup; **accounts
+can never be created from the web** — the only way into the family group is an invite code
+redeemed through the bot.
+
+- **Overview** — everyone in the group, awake or asleep, how many medicines are waiting,
+  and whether the scheduler is actually running.
+- **Per person** — the active prescription, every medicine with its schedule and course
+  progress, what's pending right now, 14-day adherence, and the recent dose log with
+  retrospective corrections marked as such.
+- **Relationships** — who looks after whom, drawn as a graph. Solid lines are a person's
+  own chat (reminded immediately), dashed lines are caregivers (reminded only after
+  silence).
+- **Invites** — mint join codes for new members and caregiver codes for backups, revoke
+  outstanding ones, see which have been redeemed.
+- **Account** — change your name, username and password; see and revoke active sessions.
+
+**It is strictly read-only over medical data.** Nothing in the dashboard can alter a
+schedule, pause a medicine or mark a dose taken — those all stay in Telegram, so the
+scheduler's safety rules live in exactly one code path.
+
+### On the security of it
+
+Worth being straight about, since this is health data on a public URL:
+
+- Sessions are random 256-bit tokens; only their SHA-256 is stored, so a copy of the
+  database does not hand over live logins. The cookie is `__Host-` prefixed, HttpOnly,
+  Secure, SameSite=Lax, and there is a CSRF token on every state-changing form.
+- Passwords are PBKDF2-HMAC-SHA256. **The work factor is capped by the platform**: the free
+  plan allows 10ms of CPU per request, and 60k iterations measured 11–17ms on the real
+  runtime, so it runs at 25k (~8–9ms per login). That is far below the ~600k OWASP
+  suggests. What compensates is that the initial password is generated with ~114 bits of
+  entropy, a chosen one must be at least 12 characters, and failed logins are throttled per
+  source address — an online guessing attack is the realistic threat, and that is what
+  stops it. An offline attack needs the D1 database, which needs your Cloudflare account.
+- Throttling is per-IP with a loose global backstop, deliberately: a single global counter
+  would let anyone lock you out of your own dashboard by guessing wrong every few minutes.
+- The admin can read every family member's medical data. That is the design — it is one
+  household's deployment — but it is worth knowing before you invite someone.
 
 ## How it works
 
