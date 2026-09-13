@@ -21,7 +21,7 @@ import { sanitizeMedicine, sanitizePatient, saneNagSteps } from './sanitize.js';
 import { advanceMedicine } from './advance.js';
 import type { DayFacts } from './planSchedule.js';
 import type { Zone } from './tz.js';
-import { MINUTE } from './tz.js';
+import { HOUR, MINUTE } from './tz.js';
 
 /**
  * Doses landing within this window of each other share one message. Five minutes is
@@ -104,10 +104,18 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
   const reports = planReports(state, now, z, today, emit);
   push(reports.wakeAt);
 
+  // Tonight's expected sleep, and the earliest the patient is expected up again. Used to
+  // keep doses inside the day they are actually having; the real wake time re-anchors
+  // anything scheduled against the expected one.
+  const sleepFrom = z.nextWallAtOrAfter(p.presumedSleepAt, Math.max(wake.wakeAnchor, now - 12 * HOUR));
+  const wakeNext = z.nextWallAtOrAfter(p.morningPollAt, sleepFrom);
+
   const facts: DayFacts = {
     wakeAnchor: wake.wakeAnchor,
     awake: wake.state === 'awake',
     localDay: today,
+    sleepFrom,
+    wakeNext,
     meals: mealFacts.meals,
     skipped: mealFacts.skipped,
   };

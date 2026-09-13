@@ -19,6 +19,16 @@ export interface DayFacts {
   wakeAnchor: number;
   awake: boolean;
   localDay: LocalDay;
+  /**
+   * Tonight's expected sleep, and the earliest the patient is expected up again.
+   *
+   * "Every four hours" means every four hours of the day you are actually having. A dose
+   * that would land at half past two is not a dose, it is an alarm clock -- so for an
+   * awake-only medicine the night is skipped at scheduling time and the dose lands on
+   * waking instead.
+   */
+  sleepFrom?: number | null;
+  wakeNext?: number | null;
   /** Resolved or predicted instants for each meal, keyed by meal id. */
   meals: Map<string, { at: number; confirmed: boolean }>;
   /** Meals the patient has said they are not having today. */
@@ -312,6 +322,22 @@ export function nextDue(
   }
   if (med.lastTakenAt !== null) {
     effective = Math.max(effective, med.lastTakenAt + Math.min(med.minGapMs, med.stepSpacingMs || med.minGapMs));
+  }
+
+  // Skip the night. An awake-only medicine whose next dose would fall while the patient
+  // is expected to be asleep is scheduled for the morning instead of sitting due at two
+  // in the morning. Deferring at the moment it becomes due would reach the same place,
+  // but this way /status and the digest say "tomorrow morning" rather than naming a time
+  // in the middle of the night, and nothing is ever pending through the small hours.
+  //
+  // Critical medicines, and anything explicitly marked as not awake-only, are exempt:
+  // those are the ones that genuinely should wake you.
+  if (
+    med.awakeOnly && !med.critical &&
+    typeof facts.sleepFrom === 'number' && typeof facts.wakeNext === 'number' &&
+    effective >= facts.sleepFrom && effective < facts.wakeNext
+  ) {
+    effective = facts.wakeNext;
   }
 
   // Daily cap, counted in the patient's local days, not rolling 24-hour windows.

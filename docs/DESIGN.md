@@ -49,9 +49,12 @@ couple of hours. A skipped meal resolves whatever depended on it.
 taken, missed, how far through each course. If that summary stops arriving, something is
 wrong, and that is the cheapest way for a person to notice.
 
-**You sleep.** Non-critical reminders stop, and a dose that came due overnight is parked --
-exactly one, not one per missed interval -- and re-raised when you get up. Medicines marked
-critical still wake you.
+**You sleep.** Nothing is scheduled into the night in the first place: "every four hours"
+means every four hours of the day you are actually having, so a dose that would land at
+half past two goes on the morning instead. Anything that does come due while you are asleep
+is parked -- exactly one, not one per missed interval -- and re-raised when you get up.
+Medicines marked `critical` are exempt, because those are the ones that genuinely should
+wake you.
 
 Then the loop starts again from whenever you happen to wake, which may be nothing like
 today.
@@ -126,6 +129,22 @@ was impossible to express at all — the second phase simply vanished on import.
 can now carry ordered `phases`, each with its own schedule and a length in days. The
 planner resolves the active phase by elapsed local days, cancels the dose scheduled under
 the old rule when the taper steps down, and tells the patient it has changed.
+
+### Waking hours
+
+"Every four hours" means every four hours of the day you are actually having. An awake-only
+medicine whose next dose would fall inside the expected sleep window is scheduled for the
+morning rather than left sitting due at two in the morning.
+
+Deferring it at the moment it became due would reach the same place, and did. The
+difference is that nothing is ever *scheduled* or pending through the small hours, so
+`/status` and the daily digest say "tomorrow morning" instead of naming a time nobody will
+be awake for.
+
+The consequence worth knowing: a strict six-hourly medicine only fits three doses into a
+fifteen-hour day. If a prescription genuinely means four doses round the clock, mark it
+`"awake_only": false`, or `"critical": true` if it should wake the patient. Otherwise
+`times_per_day` is usually the more faithful reading of "four times a day".
 
 ### Nagging
 
