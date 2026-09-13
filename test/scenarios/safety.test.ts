@@ -11,7 +11,7 @@ describe('the silent-failure guards', () => {
     // The worst realistic case: phone on charge, nobody touches it all morning.
     const w = new World({
       start: at(0, '05:00'),
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR })],
     });
 
     w.run(7 * HOUR); // 05:00 -> 12:00, answering nothing
@@ -28,7 +28,7 @@ describe('the silent-failure guards', () => {
   it('treats any inbound message as proof the patient is up', () => {
     const w = new World({
       start: at(0, '07:30'),
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR })],
     });
     w.run(MINUTE);
     expect(w.state.patient.wakeState).toBe('asleep');
@@ -45,19 +45,19 @@ describe('the silent-failure guards', () => {
     const w = new World({
       start: at(0, '06:00'),
       patient: { wakeState: 'awake', wakeConfidence: 'inferred', wakeStateSince: at(0, '06:00'), lastWakeAt: at(0, '06:00') },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 4 * HOUR, minGapMs: 3 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 4 * HOUR, minGapMs: 3 * HOUR })],
     });
 
     w.run(MINUTE);
     w.now = at(0, '06:20');
-    w.take('antibiotic drop');
+    w.take('drop_a');
 
     // Now she formally declares waking at 07:00.
     w.now = at(0, '07:00');
     w.declare('wake');
     w.run(3 * HOUR);
 
-    const times = w.takenTimes('antibiotic drop');
+    const times = w.takenTimes('drop_a');
     expect(times.length).toBe(1); // only the 06:20 dose so far
     const live = w.state.liveDoses[0]!;
     // The next dose must respect the three-hour floor from 06:20, i.e. not before 09:20.
@@ -71,11 +71,11 @@ describe('the silent-failure guards', () => {
         wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '08:00'),
         lastWakeAt: at(0, '08:00'),
       },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE })],
     });
 
     w.run(MINUTE);
-    w.take('antibiotic drop');                 // last dose of the evening
+    w.take('drop_a');                 // last dose of the evening
     w.now = at(0, '22:30');
     w.declare('sleep');
 
@@ -94,8 +94,8 @@ describe('the silent-failure guards', () => {
       start: at(0, '06:00'),
       meds: [
         makeMed({ id: 1, medKey: 'drops', intervalMs: 2 * HOUR, steps: [{ name: 'A' }, { name: 'B' }], stepSpacingMs: 10 * MINUTE, mergeable: false }),
-        makeMed({ id: 2, medKey: 'stomach capsule', intervalMs: 12 * HOUR, minGapMs: 10 * HOUR }),
-        makeMed({ id: 3, medKey: 'vitd', kind: 'fixed_times', spec: { kind: 'fixed_times', times: ['09:00'] }, intervalMs: null, minGapMs: 20 * HOUR }),
+        makeMed({ id: 2, medKey: 'stomach', intervalMs: 12 * HOUR, minGapMs: 10 * HOUR }),
+        makeMed({ id: 3, medKey: 'vitamin', kind: 'fixed_times', spec: { kind: 'fixed_times', times: ['09:00'] }, intervalMs: null, minGapMs: 20 * HOUR }),
       ],
     });
 
@@ -134,13 +134,13 @@ describe('escalation to the caregiver', () => {
     const w = new World({
       start: at(0, '08:00'),
       patient: { wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'), lastWakeAt: at(0, '07:00') },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 4 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 4 * HOUR })],
       chats,
     });
 
     w.run(MINUTE);
     w.now += 4 * MINUTE;       // answers after four minutes
-    w.take('antibiotic drop');
+    w.take('drop_a');
     w.run(10 * MINUTE);
 
     expect(w.sent.some((s) => s.chatId === 200), 'caregiver was bothered unnecessarily').toBe(false);
@@ -151,7 +151,7 @@ describe('escalation to the caregiver', () => {
     const w = new World({
       start: at(0, '08:00'),
       patient: { wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'), lastWakeAt: at(0, '07:00') },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 4 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 4 * HOUR })],
       chats,
     });
 
@@ -166,7 +166,7 @@ describe('escalation to the caregiver', () => {
     const w = new World({
       start: at(0, '08:00'),
       patient: { wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'), lastWakeAt: at(0, '07:00') },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 4 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 4 * HOUR })],
       chats,
     });
 
@@ -175,14 +175,14 @@ describe('escalation to the caregiver', () => {
     w.resolve(dose.id, 'taken', { byChat: 200 });
     w.run(MINUTE);
 
-    expect(w.takenTimes('antibiotic drop').length).toBe(1);
+    expect(w.takenTimes('drop_a').length).toBe(1);
     const taken = w.allDoses.find((d) => d.status === 'taken')!;
     expect(taken.resolvedByChat).toBe(200);
   });
 });
 
 describe('retrospective acknowledgment', () => {
-  const med = makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE });
+  const med = makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE });
 
   it('attaches a stated time to the dose currently pending', () => {
     const live = { id: 5, status: 'prompted', effectiveDueAt: at(0, '17:00'), plannedDueAt: at(0, '17:00') } as never;

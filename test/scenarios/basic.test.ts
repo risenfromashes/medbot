@@ -10,7 +10,7 @@ describe('a normal day', () => {
   it('stays silent overnight, asks in the morning, then doses on waking', () => {
     const w = new World({
       start: at(0, '05:00'),
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', name: 'antibiotic drop', intervalMs: 2 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', name: 'Antibiotic drop', intervalMs: 2 * HOUR })],
     });
 
     // 05:00 -> 07:00: asleep, nothing at all should be sent.
@@ -38,13 +38,13 @@ describe('a normal day', () => {
     const w = new World({
       start: at(0, '07:00'),
       patient: { wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'), lastWakeAt: at(0, '07:00') },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR })],
     });
 
     w.run(MINUTE);
     // Answer 12 minutes late -- inside the 30-minute absorb tolerance.
     w.now = at(0, '07:12');
-    w.take('antibiotic drop');
+    w.take('drop_a');
     w.run(2 * HOUR);
 
     // The next dose must land at 09:00 (grid preserved), not 09:12 (drift).
@@ -56,13 +56,13 @@ describe('a normal day', () => {
     const w = new World({
       start: at(0, '07:00'),
       patient: { wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'), lastWakeAt: at(0, '07:00') },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR })],
     });
 
     w.run(MINUTE);
     // 50 minutes late -- beyond tolerance, so this is a genuinely missed-then-taken dose.
     w.now = at(0, '07:50');
-    w.take('antibiotic drop');
+    w.take('drop_a');
     w.run(MINUTE);
 
     const due = w.state.liveDoses[0]!;
@@ -79,7 +79,7 @@ describe('drift over a week', () => {
         lastWakeAt: at(0, '06:00'), presumedSleepAt: '23:59', eveningPollAt: '23:50',
       },
       meds: [makeMed({
-        id: 1, medKey: 'antibiotic', name: 'Aantibiotic dropcillin', intervalMs: 8 * HOUR,
+        id: 1, medKey: 'antibiotic', name: 'Antibiotic', intervalMs: 8 * HOUR,
         minGapMs: 6 * HOUR, awakeOnly: false, spec: { kind: 'interval', intervalMs: 8 * HOUR, anchor: 'clock' },
       })],
     });
@@ -114,7 +114,7 @@ describe('the spacing group', () => {
       patient: { wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'), lastWakeAt: at(0, '07:00') },
       meds: [makeMed({
         id: 1, medKey: 'drops', name: 'Eye drops', intervalMs: 2 * HOUR,
-        steps: [{ name: 'antibiotic drop' }, { name: 'steroid drop' }, { name: 'lubricating drop' }],
+        steps: [{ name: 'Drop one' }, { name: 'Drop two' }, { name: 'Drop three' }],
         stepSpacingMs: 10 * MINUTE, mergeable: false,
       })],
     });
@@ -179,7 +179,7 @@ describe('never gives up, but never wedges', () => {
         wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'),
         lastWakeAt: at(0, '07:00'), presumedSleepAt: '23:59', eveningPollAt: '23:50',
       },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 6 * HOUR, minGapMs: 4 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 6 * HOUR, minGapMs: 4 * HOUR })],
     });
 
     w.run(90 * MINUTE);
@@ -199,11 +199,11 @@ describe('never gives up, but never wedges', () => {
         wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'),
         lastWakeAt: at(0, '07:00'), presumedSleepAt: '23:59', eveningPollAt: '23:50',
       },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE })],
     });
 
     w.run(5 * HOUR);
-    expect(w.countByStatus('antibiotic drop', 'missed')).toBeGreaterThanOrEqual(2);
+    expect(w.countByStatus('drop_a', 'missed')).toBeGreaterThanOrEqual(2);
     // Crucially, the medicine is still live and still being asked about.
     expect(w.state.liveDoses.length).toBe(1);
   });

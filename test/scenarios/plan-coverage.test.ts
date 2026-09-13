@@ -13,7 +13,7 @@ describe('the user confirms being awake at 2pm', () => {
   it('anchors the day on 2pm and does not fire a backlog of morning doses', () => {
     const w = new World({
       start: at(0, '06:00'),
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE })],
     });
 
     // Nobody answers all morning. The presumed-wake fallback starts dosing at 09:30.
@@ -42,7 +42,7 @@ describe('an eleven-hour sleep', () => {
         wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '08:00'),
         lastWakeAt: at(0, '08:00'),
       },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE })],
     });
     w.respectSchedule = true;
 
@@ -70,7 +70,7 @@ describe('a dose acknowledged five hours late', () => {
         wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'),
         lastWakeAt: at(0, '07:00'), presumedSleepAt: '23:59', eveningPollAt: '23:50',
       },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 4 * HOUR, minGapMs: 3 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 4 * HOUR, minGapMs: 3 * HOUR })],
       chats: [makeChat({ chatId: 100 })],
     });
 
@@ -98,7 +98,7 @@ describe('a tick skipped for twenty-five minutes', () => {
         wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'),
         lastWakeAt: at(0, '07:00'), presumedSleepAt: '23:59', eveningPollAt: '23:50',
       },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 6 * HOUR, minGapMs: 4 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 6 * HOUR, minGapMs: 4 * HOUR })],
       chats: [makeChat({ chatId: 100 })],
     });
 
@@ -122,7 +122,7 @@ describe('a tick delivered twice', () => {
         wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'),
         lastWakeAt: at(0, '07:00'), presumedSleepAt: '23:59', eveningPollAt: '23:50',
       },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 4 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 4 * HOUR })],
       chats: [makeChat({ chatId: 100 })],
     });
 
@@ -144,7 +144,7 @@ describe('retrospective wake re-anchors the day', () => {
   it('a wake time stated after the fact moves the anchor, not just the state', () => {
     const w = new World({
       start: at(0, '09:00'),
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE })],
     });
     w.tick();
 
@@ -158,7 +158,7 @@ describe('retrospective wake re-anchors the day', () => {
   });
 
   it('refuses to attach a stated time to a dose it could not belong to', () => {
-    const med = makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE });
+    const med = makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE });
     const r = resolveRetro({
       med, live: null, recent: [],
       statedAt: at(0, '03:00'), now: at(0, '18:00'),
@@ -174,7 +174,7 @@ describe('a prescription re-imported mid-course', () => {
     const { parsePrescription } = await import('../../src/core/prescription.js');
     const doc = {
       version: 1,
-      medicines: [{ id: 'antibiotic drop', name: 'Moxi', schedule: { type: 'interval', every: '2h' }, course: { days: 7 } }],
+      medicines: [{ id: 'drop_a', name: 'drop_a', schedule: { type: 'interval', every: '2h' }, course: { days: 7 } }],
     };
     const first = parsePrescription(doc, { now: at(0, '08:00') });
     const second = parsePrescription(doc, { now: at(3, '08:00') });
@@ -182,13 +182,13 @@ describe('a prescription re-imported mid-course', () => {
     // Identical input must produce an identical spec hash -- that equality is precisely
     // what lets the importer leave a mid-course medicine alone.
     expect(first.value!.meds[0]!.specHash).toBe(second.value!.meds[0]!.specHash);
-    expect(first.value!.meds[0]!.medKey).toBe('antibiotic drop');
+    expect(first.value!.meds[0]!.medKey).toBe('drop_a');
   });
 
   it('a changed schedule produces a different hash, so it is detected', async () => {
     const { parsePrescription } = await import('../../src/core/prescription.js');
-    const a = parsePrescription({ version: 1, medicines: [{ id: 'antibiotic drop', name: 'Moxi', schedule: { type: 'interval', every: '2h' } }] }, { now: 0 });
-    const b = parsePrescription({ version: 1, medicines: [{ id: 'antibiotic drop', name: 'Moxi', schedule: { type: 'interval', every: '3h' } }] }, { now: 0 });
+    const a = parsePrescription({ version: 1, medicines: [{ id: 'drop_a', name: 'drop_a', schedule: { type: 'interval', every: '2h' } }] }, { now: 0 });
+    const b = parsePrescription({ version: 1, medicines: [{ id: 'drop_a', name: 'drop_a', schedule: { type: 'interval', every: '3h' } }] }, { now: 0 });
     expect(a.value!.meds[0]!.specHash).not.toBe(b.value!.meds[0]!.specHash);
   });
 });
@@ -237,7 +237,7 @@ describe('a DST weekend at the scheduler level', () => {
         lastWakeAt: start, presumedSleepAt: '23:59', eveningPollAt: '23:50',
       },
       meds: [makeMed({
-        id: 1, medKey: 'vitd', kind: 'fixed_times', intervalMs: null,
+        id: 1, medKey: 'vitamin', kind: 'fixed_times', intervalMs: null,
         spec: { kind: 'fixed_times', times: ['01:30'] }, minGapMs: 20 * HOUR, awakeOnly: false,
       })],
       chats: [makeChat({ chatId: 100 })],
@@ -251,7 +251,7 @@ describe('a DST weekend at the scheduler level', () => {
     }
 
     // 01:30 happens twice on the fall-back night. It must still produce one dose a day.
-    const taken = w.takenTimes('vitd');
+    const taken = w.takenTimes('vitamin');
     expect(taken.length).toBeLessThanOrEqual(4);
     expect(taken.length).toBeGreaterThanOrEqual(2);
   });

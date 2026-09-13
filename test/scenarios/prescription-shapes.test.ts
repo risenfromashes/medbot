@@ -9,11 +9,11 @@ const z = zoneFor(TZ);
 const at = (day: number, hhmm: string): number => z.wallOnDayUtc(z.addLocalDays('2026-09-14', day), hhmm);
 
 /**
- * A real post-operative eye prescription. Every assertion here is something the original
+ * A prescription exercising every shape of the format. Every assertion here is one the original
  * design got wrong, found by transcribing an actual piece of paper rather than an
  * imagined one.
  */
-const doc = JSON.parse(readFileSync('examples/post-op-eye.json', 'utf8'));
+const doc = JSON.parse(readFileSync('examples/example.json', 'utf8'));
 const parsed = parsePrescription(doc, { now: at(0, '12:00') });
 
 describe('parsing the real prescription', () => {
@@ -25,17 +25,17 @@ describe('parsing the real prescription', () => {
     const by = new Map(parsed.value!.meds.map((m) => [m.medKey, m]));
     // The lubricant is two-hourly and indefinite; folding it into a group would have
     // rewritten it to four times a day for fourteen days.
-    expect(by.get('drop')!.intervalMs).toBe(2 * HOUR);
-    expect(by.get('drop')!.courseKind).toBe('indefinite');
-    expect(by.get('drop')!.courseDays).toBe(14);
+    expect(by.get('lubricant_drop')!.intervalMs).toBe(2 * HOUR);
+    expect(by.get('lubricant_drop')!.courseKind).toBe('indefinite');
+    expect(by.get('antibiotic_drop')!.courseDays).toBe(14);
     // Four times a day, spread from whenever she actually gets up.
-    expect(by.get('drop')!.spec.anchor).toBe('wake');
-    expect(describeSchedule(by.get('drop')!)).toContain('from waking');
+    expect(by.get('antibiotic_drop')!.spec.anchor).toBe('wake');
+    expect(describeSchedule(by.get('antibiotic_drop')!)).toContain('from waking');
   });
 
   it('keeps all three drops ten minutes apart from each other', () => {
-    const drops = parsed.value!.meds.filter((m) => m.spacingGroup === 'eye_drops');
-    expect(drops.map((d) => d.medKey).sort()).toEqual(['drop', 'drop', 'drop']);
+    const drops = parsed.value!.meds.filter((m) => m.spacingGroup === 'drops');
+    expect(drops.map((d) => d.medKey).sort()).toEqual(['antibiotic_drop', 'lubricant_drop', 'steroid_drop']);
     for (const d of drops) {
       expect(d.spacingMs).toBe(10 * MINUTE);
       expect(d.mergeable, 'a spaced drop must never share a message').toBe(false);
@@ -43,46 +43,46 @@ describe('parsing the real prescription', () => {
   });
 
   it('understands the taper: 4x a day for a week, then 3x for a week', () => {
-    const drop = parsed.value!.meds.find((m) => m.medKey === 'drop')!;
-    expect(drop.phases).not.toBeNull();
-    expect(drop.phases!.length).toBe(2);
-    expect(drop.phases![0]!.days).toBe(7);
-    expect(drop.phases![1]!.days).toBe(7);
+    const steroid_drop = parsed.value!.meds.find((m) => m.medKey === 'steroid_drop')!;
+    expect(steroid_drop.phases).not.toBeNull();
+    expect(steroid_drop.phases!.length).toBe(2);
+    expect(steroid_drop.phases![0]!.days).toBe(7);
+    expect(steroid_drop.phases![1]!.days).toBe(7);
     // Four doses a day in the first phase, three in the second -- so the gap widens.
-    expect(drop.phases![0]!.intervalMs).toBeLessThan(drop.phases![1]!.intervalMs!);
-    expect(drop.phases![0]!.spec.anchor).toBe('wake');
+    expect(steroid_drop.phases![0]!.intervalMs).toBeLessThan(steroid_drop.phases![1]!.intervalMs!);
+    expect(steroid_drop.phases![0]!.spec.anchor).toBe('wake');
     // The whole course is fourteen days, not seven.
-    expect(drop.courseDays).toBe(14);
+    expect(steroid_drop.courseDays).toBe(14);
   });
 
   it('keeps "before meal" and "after meal" genuinely different, and tied to the meals', () => {
     const by = new Map(parsed.value!.meds.map((m) => [m.medKey, m]));
-    const before = by.get('stomach capsule')!.spec.meals!;
-    const after = by.get('flexi')!.spec.meals!;
+    const before = by.get('stomach_capsule')!.spec.meals!;
+    const after = by.get('anti_inflammatory')!.spec.meals!;
 
     // Both follow breakfast and dinner rather than clock times standing in for them.
     expect(before.map((r) => r.meal)).toEqual(['breakfast', 'dinner']);
     expect(after.map((r) => r.meal)).toEqual(['breakfast', 'dinner']);
 
-    // stomach capsule is a proton-pump inhibitor: half an hour before food actually matters.
+    // stomach_capsule is a proton-pump inhibitor: half an hour before food actually matters.
     expect(before.every((r) => r.relation === 'before' && r.offsetMs === 30 * MINUTE)).toBe(true);
-    // Flexi just needs food; inventing a delay would be its own kind of wrong.
+    // anti_inflammatory just needs food; inventing a delay would be its own kind of wrong.
     expect(after.every((r) => r.relation === 'after' && r.offsetMs === 0)).toBe(true);
   });
 });
 
 describe('the taper in motion', () => {
-  const drop = parsed.value!.meds.find((m) => m.medKey === 'drop')!;
+  const steroid_drop = parsed.value!.meds.find((m) => m.medKey === 'steroid_drop')!;
   const med = makeMed({
-    id: 1, medKey: 'drop', kind: drop.kind, spec: drop.spec,
-    intervalMs: drop.intervalMs, phases: drop.phases, courseKind: 'days',
-    courseDays: drop.courseDays, startedAt: at(0, '08:00'),
+    id: 1, medKey: 'steroid_drop', kind: steroid_drop.kind, spec: steroid_drop.spec,
+    intervalMs: steroid_drop.intervalMs, phases: steroid_drop.phases, courseKind: 'days',
+    courseDays: steroid_drop.courseDays, startedAt: at(0, '08:00'),
   });
 
   it('is in the four-a-day phase on day one', () => {
     const p = activePhase(med, z, z.localDay(at(0, '12:00')));
     expect(p.index).toBe(0);
-    expect(p.phase!.intervalMs).toBe(drop.phases![0]!.intervalMs);
+    expect(p.phase!.intervalMs).toBe(steroid_drop.phases![0]!.intervalMs);
   });
 
   it('is still in the first phase on day seven', () => {
@@ -93,7 +93,7 @@ describe('the taper in motion', () => {
     const p = activePhase(med, z, z.localDay(at(7, '12:00')));
     expect(p.index).toBe(1);
     // The step-down means a longer gap between doses.
-    expect(p.phase!.intervalMs!).toBeGreaterThan(drop.phases![0]!.intervalMs!);
+    expect(p.phase!.intervalMs!).toBeGreaterThan(steroid_drop.phases![0]!.intervalMs!);
   });
 
   it('is finished after fourteen days', () => {
@@ -128,13 +128,13 @@ describe('three differently-scheduled drops, ten minutes apart', () => {
         lastWakeAt: at(0, '07:00'), presumedSleepAt: '23:59', eveningPollAt: '23:50',
       },
       meds: [
-        makeMed({ id: 1, medKey: 'drop', kind: 'fixed_times', intervalMs: null, minGapMs: 3 * HOUR,
+        makeMed({ id: 1, medKey: 'antibiotic_drop', kind: 'fixed_times', intervalMs: null, minGapMs: 3 * HOUR,
           spec: { kind: 'fixed_times', times: ['08:00', '12:40', '17:20', '22:00'] },
           spacingGroup: 'drops', spacingMs: 10 * MINUTE, mergeable: false }),
-        makeMed({ id: 2, medKey: 'drop', kind: 'fixed_times', intervalMs: null, minGapMs: 3 * HOUR,
+        makeMed({ id: 2, medKey: 'steroid_drop', kind: 'fixed_times', intervalMs: null, minGapMs: 3 * HOUR,
           spec: { kind: 'fixed_times', times: ['08:00', '12:40', '17:20', '22:00'] },
           spacingGroup: 'drops', spacingMs: 10 * MINUTE, mergeable: false }),
-        makeMed({ id: 3, medKey: 'drop', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE,
+        makeMed({ id: 3, medKey: 'lubricant_drop', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE,
           spec: { kind: 'interval', intervalMs: 2 * HOUR, anchor: 'wake' },
           spacingGroup: 'drops', spacingMs: 10 * MINUTE, mergeable: false }),
       ],
@@ -181,7 +181,7 @@ describe('three differently-scheduled drops, ten minutes apart', () => {
 
     // Everything still pending must now sit at least ten minutes after 08:07.
     for (const d of w.state.liveDoses) {
-      if (d.medId === w.med('drop').id && d.status === 'taken') continue;
+      if (d.medId === w.med('antibiotic_drop').id && d.status === 'taken') continue;
       expect(d.effectiveDueAt, 'a drop was scheduled within ten minutes of the last one').toBeGreaterThanOrEqual(at(0, '08:17'));
     }
   });
@@ -198,15 +198,15 @@ describe('three differently-scheduled drops, ten minutes apart', () => {
     }
 
     // From 07:00 to 22:00 at two-hourly, that is about seven or eight doses.
-    const lubricant = w.takenTimes('drop').length;
+    const lubricant = w.takenTimes('lubricant_drop').length;
     expect(lubricant, `lubricant only dosed ${lubricant} times in 15 hours`).toBeGreaterThanOrEqual(5);
     // While the four-times-a-day drop stays at four.
-    expect(w.takenTimes('drop').length).toBeLessThanOrEqual(5);
+    expect(w.takenTimes('antibiotic_drop').length).toBeLessThanOrEqual(5);
   });
 });
 
 describe('taking a dose before the bot asks', () => {
-  const med = makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 4 * HOUR, minGapMs: 3 * HOUR });
+  const med = makeMed({ id: 1, medKey: 'drop_a', intervalMs: 4 * HOUR, minGapMs: 3 * HOUR });
 
   it('resolves the pending dose and re-bases from the real time', async () => {
     const { resolveRetro } = await import('../../src/core/retro.js');
@@ -244,12 +244,12 @@ describe('taking a dose before the bot asks', () => {
         wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'),
         lastWakeAt: at(0, '07:00'), presumedSleepAt: '23:59', eveningPollAt: '23:50',
       },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 4 * HOUR, minGapMs: 3 * HOUR, driftPolicy: 'strict_actual' })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 4 * HOUR, minGapMs: 3 * HOUR, driftPolicy: 'strict_actual' })],
       chats: [makeChat({ chatId: 100 })],
     });
 
     w.tick();
-    w.take('antibiotic drop');                      // first dose at 08:00
+    w.take('drop_a');                      // first dose at 08:00
     w.run(2 * HOUR);                     // next is due 12:00
 
     const pending = w.state.liveDoses[0]!;

@@ -29,7 +29,7 @@ escalating and the previous message deleted so the chat stays readable. It does 
 up. If you have a backup person, anything you have ignored for five minutes goes to them
 too, and they can answer for you.
 
-**You answer, whenever.** Tap Taken, or say `/took antibiotic drop 5pm` if you took it earlier and
+**You answer, whenever.** Tap Taken, or say `/took drop_a 5pm` if you took it earlier and
 forgot, or log it before the bot has even asked. Either way the next dose is measured from
 when you actually took it -- absorbing small lateness so the day does not drift, re-basing
 on the real time when you were properly late.
@@ -111,10 +111,10 @@ available per medicine.
 schedule. The first design got this wrong: it folded a group into one medicine with
 ordered steps, on the assumption that drops needing a gap are on the same frequency.
 
-A real post-operative prescription disproved that — three drops all needing ten minutes
+That does not survive contact with real prescriptions — three drops can need ten minutes
 between them, but one four times a day for 14 days, one four times a day for 7 then three
-times a day for 7, and a lubricant every two hours indefinitely. Folding them silently
-rewrote two of the three, turning a two-hourly lubricant into four doses a day and
+times a day for 7, and a drop_c every two hours indefinitely. Folding them silently
+rewrote two of the three, turning a two-hourly drop_c into four doses a day and
 truncating an indefinite course at fourteen days.
 
 So each medicine keeps its own schedule and its own course, and the planner refuses to
@@ -124,8 +124,8 @@ and if the first is really taken at 08:03, the other two shift to 08:13 and 08:2
 
 ### Tapering courses
 
-"4 times a day for 7 days, then 3 times a day for 7 days" is routine in ophthalmology and
-was impossible to express at all — the second phase simply vanished on import. A medicine
+"4 times a day for 7 days, then 3 times a day for 7 days" is routine, especially for
+steroids, and was impossible to express at all — the second phase simply vanished on import. A medicine
 can now carry ordered `phases`, each with its own schedule and a length in days. The
 planner resolves the active phase by elapsed local days, cancels the dose scheduled under
 the old rule when the taper steps down, and tells the patient it has changed.
@@ -168,7 +168,7 @@ of question that can quietly die in a chat nobody is looking at.
 
 ### Taking a dose early
 
-`/took antibiotic drop` works before the bot has asked. Someone already up and holding the bottle has
+`/took drop_a` works before the bot has asked. Someone already up and holding the bottle has
 taken that dose, and the chain re-bases from when they really did it.
 
 How far "early" may go is bounded by the medicine's own safety floor, not by the schedule:
@@ -191,7 +191,7 @@ routine first means only the changing medicine moves as the taper steps down.
 
 ### Correcting the past
 
-`/took antibiotic drop 5pm` works even if the bot already wrote that dose off. It finds the dose whose
+`/took drop_a 5pm` works even if the bot already wrote that dose off. It finds the dose whose
 slot covers five o'clock, flips it to taken, cancels whatever the scheduler built on the
 wrong assumption, and recalculates from there. Both the original and the correction stay in
 the log.
@@ -454,7 +454,7 @@ actual last dose), `fixed_times`, `times_per_day` (compiled to fixed times at im
 South Asian `1+0+1` notation so a prescription can be transcribed literally.
 
 Full schema in [`schema/prescription.schema.json`](../schema/prescription.schema.json), a
-worked example in [`examples/eye-drops.json`](../examples/eye-drops.json), and the prompt
+worked example in [`examples/example.json`](../examples/example.json), and the prompt
 that generates it in [`LLM_PROMPT.md`](LLM_PROMPT.md).
 
 Re-importing mid-course keys on a stable `med_key`, so a corrected prescription preserves

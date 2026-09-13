@@ -20,7 +20,7 @@ describe('with the wake-up gate on, as in production', () => {
     const w = new World({
       start: at(0, '08:00'),
       patient: { wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'), lastWakeAt: at(0, '07:00') },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 4 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 4 * HOUR })],
       chats,
     });
     w.respectSchedule = true;
@@ -41,7 +41,7 @@ describe('with the wake-up gate on, as in production', () => {
         wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'),
         lastWakeAt: at(0, '07:00'), presumedSleepAt: '23:59', eveningPollAt: '23:50',
       },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 6 * HOUR, minGapMs: 4 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 6 * HOUR, minGapMs: 4 * HOUR })],
       chats: [makeChat({ chatId: 100 })],
     });
     w.respectSchedule = true;
@@ -58,7 +58,7 @@ describe('with the wake-up gate on, as in production', () => {
     const w = new World({
       start: at(0, '22:00'),
       patient: { wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '08:00'), lastWakeAt: at(0, '08:00') },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR })],
       chats: [makeChat({ chatId: 100 })],
     });
     w.respectSchedule = true;
@@ -76,7 +76,7 @@ describe('with the wake-up gate on, as in production', () => {
       start: at(0, '06:00'),
       meds: [
         makeMed({ id: 1, medKey: 'drops', intervalMs: 2 * HOUR, steps: [{ name: 'A' }, { name: 'B' }], stepSpacingMs: 10 * MINUTE, mergeable: false }),
-        makeMed({ id: 2, medKey: 'stomach capsule', intervalMs: 12 * HOUR, minGapMs: 10 * HOUR }),
+        makeMed({ id: 2, medKey: 'stomach', intervalMs: 12 * HOUR, minGapMs: 10 * HOUR }),
       ],
       chats,
     });

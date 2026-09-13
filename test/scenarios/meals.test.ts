@@ -21,12 +21,12 @@ function world(wakeAt: number): World {
     },
     meds: [
       makeMed({
-        id: 1, medKey: 'stomach capsule', name: 'stomach capsule', kind: 'meal', intervalMs: null,
+        id: 1, medKey: 'stomach_capsule', name: 'Stomach protection capsule', kind: 'meal', intervalMs: null,
         minGapMs: 4 * HOUR,
         spec: { kind: 'meal', meal: { meal: 'breakfast', relation: 'before', offsetMs: 30 * MINUTE } },
       }),
       makeMed({
-        id: 2, medKey: 'flexi', name: 'Anti-inflammatory tablet', kind: 'meal', intervalMs: null,
+        id: 2, medKey: 'anti_inflammatory', name: 'Anti-inflammatory tablet', kind: 'meal', intervalMs: null,
         minGapMs: 4 * HOUR,
         spec: { kind: 'meal', meal: { meal: 'breakfast', relation: 'after', offsetMs: 0 } },
       }),
@@ -118,7 +118,7 @@ describe('the bot asks when you will eat, rather than assuming', () => {
 
     expect(w.state.mealEvents.find((e) => e.meal === 'breakfast')!.at).toBe(proposed + HOUR);
     // And the before-meal tablet follows it.
-    const dose = w.state.liveDoses.find((d) => d.medId === w.med('stomach capsule').id);
+    const dose = w.state.liveDoses.find((d) => d.medId === w.med('stomach_capsule').id);
     expect(dose!.effectiveDueAt).toBe(proposed + HOUR - 30 * MINUTE);
   });
 });
@@ -132,7 +132,7 @@ describe('working backwards from when you say you will eat', () => {
     planMeal(w, 'breakfast', 2 * HOUR);   // "in about two hours" -> 10:45
     w.run(5 * MINUTE);
 
-    const dose = w.state.liveDoses.find((d) => d.medId === w.med('stomach capsule').id);
+    const dose = w.state.liveDoses.find((d) => d.medId === w.med('stomach_capsule').id);
     expect(dose, 'the before-meal tablet was never scheduled').toBeDefined();
     // Half an hour before 10:45.
     expect(dose!.effectiveDueAt).toBe(at(0, '10:15'));
@@ -145,13 +145,13 @@ describe('working backwards from when you say you will eat', () => {
     w.now = at(0, '08:45');
     planMeal(w, 'breakfast', 3 * HOUR);   // 11:45
     w.run(5 * MINUTE);
-    expect(w.state.liveDoses.find((d) => d.medId === w.med('stomach capsule').id)!.effectiveDueAt).toBe(at(0, '11:15'));
+    expect(w.state.liveDoses.find((d) => d.medId === w.med('stomach_capsule').id)!.effectiveDueAt).toBe(at(0, '11:15'));
 
     // "Actually, another half hour."
     w.now = at(0, '09:00');
     planMeal(w, 'breakfast', 4 * HOUR);   // 13:00
     w.run(5 * MINUTE);
-    expect(w.state.liveDoses.find((d) => d.medId === w.med('stomach capsule').id)!.effectiveDueAt).toBe(at(0, '12:30'));
+    expect(w.state.liveDoses.find((d) => d.medId === w.med('stomach_capsule').id)!.effectiveDueAt).toBe(at(0, '12:30'));
   });
 
   it('tells you why the tablet is due now', () => {
@@ -179,12 +179,12 @@ describe('working backwards from when you say you will eat', () => {
     w.run(2 * HOUR);
 
     // Planned but never confirmed: the after-meal tablet must not have fired on a plan.
-    const afterBeforeEating = w.takenTimes('flexi').length;
+    const afterBeforeEating = w.takenTimes('anti_inflammatory').length;
     expect(afterBeforeEating).toBe(0);
 
     w.eat('breakfast');
     w.run(30 * MINUTE);
-    const dose = w.state.liveDoses.find((d) => d.medId === w.med('flexi').id);
+    const dose = w.state.liveDoses.find((d) => d.medId === w.med('anti_inflammatory').id);
     expect(dose, 'the after-meal tablet never appeared once she ate').toBeDefined();
   });
 });
@@ -212,7 +212,7 @@ describe('when the plan does not survive contact with the day', () => {
     expect(event, 'the meal record vanished').toBeDefined();
     expect(event!.source, 'still waiting on a meal from hours ago').toBe('presumed');
     // And the after-meal tablet is released rather than hanging for ever.
-    const dose = w.state.liveDoses.find((d) => d.medId === w.med('flexi').id);
+    const dose = w.state.liveDoses.find((d) => d.medId === w.med('anti_inflammatory').id);
     expect(dose, 'the after-meal tablet was stranded').toBeDefined();
   });
 
@@ -232,10 +232,10 @@ describe('when the plan does not survive contact with the day', () => {
     // before she said so is fair -- the bot did not know yet.
     const flexiPrompts = w.sent.filter((s) =>
       s.at > skippedAt &&
-      s.doseIds.some((id) => w.allDoses.find((d) => d.id === id)?.medId === w.med('flexi').id));
+      s.doseIds.some((id) => w.allDoses.find((d) => d.id === id)?.medId === w.med('anti_inflammatory').id));
     expect(flexiPrompts.length, 'kept asking about a meal she said she was skipping').toBe(0);
     // And the dose is resolved rather than left hanging all day.
-    expect(w.state.liveDoses.filter((d) => d.medId === w.med('flexi').id).length).toBe(0);
+    expect(w.state.liveDoses.filter((d) => d.medId === w.med('anti_inflammatory').id).length).toBe(0);
   });
 
   it('does not bunch the next meal question up against the last one', () => {
@@ -281,6 +281,6 @@ describe('the proposal is always actionable', () => {
     expect(event, 'a meal nobody answered about vanished entirely').toBeDefined();
     expect(event!.source).toBe('presumed');
     // And the after-meal tablet was not stranded waiting for an answer.
-    expect(w.state.liveDoses.filter((d) => d.medId === w.med('flexi').id).length).toBe(1);
+    expect(w.state.liveDoses.filter((d) => d.medId === w.med('anti_inflammatory').id).length).toBe(1);
   });
 });

@@ -20,7 +20,7 @@ describe('the daily digest', () => {
     const w = new World({
       start: at(0, '20:00'),
       patient: { digestAt: '21:00', wakeState: 'awake', wakeStateSince: at(0, '07:00') },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop' })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a' })],
     });
 
     expect(collect(w, at(0, '20:30')).some((a) => a.t === 'sendInfo')).toBe(false);
@@ -38,14 +38,14 @@ describe('the daily digest', () => {
     const w = new World({
       start: at(0, '21:05'),
       patient: { digestAt: '21:00', wakeState: 'awake', wakeStateSince: at(0, '07:00') },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', name: 'antibiotic drop' })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', name: 'Antibiotic drop' })],
     });
     w.state.dayCounters.set(1, { taken: 5, missed: 2 });
 
     const info = collect(w, at(0, '21:05')).find((a) => a.t === 'sendInfo');
     expect(info).toBeDefined();
     if (info?.t === 'sendInfo') {
-      expect(info.text).toContain('antibiotic drop');
+      expect(info.text).toContain('Antibiotic drop');
       expect(info.text).toContain('5 taken');
       expect(info.text).toContain('2 missed');
     }
@@ -55,7 +55,7 @@ describe('the daily digest', () => {
     const w = new World({
       start: at(0, '21:05'),
       patient: { digestAt: '21:00', wakeState: 'awake', wakeStateSince: at(0, '07:00') },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop' })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a' })],
     });
     const info = collect(w, at(0, '21:05')).find((a) => a.t === 'sendInfo');
     if (info?.t === 'sendInfo') expect(info.text).toContain('Nothing recorded today');
@@ -66,7 +66,7 @@ describe('the liveness watchdog', () => {
   it('stays quiet while a medicine is behaving', () => {
     const w = new World({
       start: at(0, '12:00'),
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR })],
     });
     w.state.meds[0]!.lastTakenAt = at(0, '11:00');
     w.state.meds[0]!.startedAt = at(0, '08:00');
@@ -78,7 +78,7 @@ describe('the liveness watchdog', () => {
   it('escalates a medicine that has gone quiet for far longer than its cycle', () => {
     const w = new World({
       start: at(1, '12:00'),
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', name: 'antibiotic drop', intervalMs: 2 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', name: 'Antibiotic drop', intervalMs: 2 * HOUR })],
     });
     // Last dose was well over three cycles ago.
     w.state.meds[0]!.lastTakenAt = at(0, '08:00');
@@ -87,7 +87,7 @@ describe('the liveness watchdog', () => {
     const alert = collect(w, at(1, '12:00')).find((a) => a.t === 'sendInfo');
     expect(alert).toBeDefined();
     if (alert?.t === 'sendInfo') {
-      expect(alert.text).toContain('antibiotic drop');
+      expect(alert.text).toContain('Antibiotic drop');
       // Goes above the patient's own chat: by definition they are not seeing reminders.
       expect(alert.tier).toBe(1);
     }
@@ -96,7 +96,7 @@ describe('the liveness watchdog', () => {
   it('does not fire for a medicine that has never started', () => {
     const w = new World({
       start: at(1, '12:00'),
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR })],
     });
     expect(collect(w, at(1, '12:00')).filter((a) => a.t === 'sendInfo').length).toBe(0);
   });
@@ -121,7 +121,7 @@ describe('course completion', () => {
         lastWakeAt: at(0, '07:00'), presumedSleepAt: '23:59', eveningPollAt: '23:50',
       },
       meds: [makeMed({
-        id: 1, medKey: 'antibiotic drop', name: 'antibiotic drop', intervalMs: 4 * HOUR,
+        id: 1, medKey: 'drop_a', name: 'Antibiotic drop', intervalMs: 4 * HOUR,
         minGapMs: 3 * HOUR, courseKind: 'days', courseDays: 1,
         startedAt: at(-1, '08:00'),
       })],
@@ -158,12 +158,12 @@ describe('the prescription prompt the bot hands out', () => {
       version: 1,
       timezone: 'Asia/Dhaka',
       meals: [{ id: 'breakfast', typical_local: '08:30', ask_after_local: '09:30' }],
-      groups: [{ id: 'eye_drops', spacing: '10m' }],
+      groups: [{ id: 'drops', spacing: '10m' }],
       medicines: [
         {
-          id: 'antibiotic drop', name: 'antibiotic drop', dose: '1 drop, right eye',
+          id: 'drop_a', name: 'Antibiotic drop', dose: '1 drop, right eye',
           schedule: { type: 'interval', every: '2h', anchor: 'wake' },
-          min_gap: '90m', group: 'eye_drops', group_seq: 1, course: { days: 7 },
+          min_gap: '90m', group: 'drops', group_seq: 1, course: { days: 7 },
         },
       ],
     };
@@ -178,7 +178,7 @@ describe('adding one medicine without replacing the prescription', () => {
     const wrapped = {
       version: 1,
       medicines: [{
-        id: 'painkiller', name: 'painkiller', dose: '1 tablet',
+        id: 'painkiller', name: 'Painkiller', dose: '1 tablet',
         schedule: { type: 'as_needed' }, min_gap: '6h', max_per_day: 4,
       }],
     };
@@ -202,7 +202,7 @@ describe('reports do not disturb the scheduler', () => {
       patient: { digestAt: '21:00' },
       meds: [
         makeMed({ id: 1, medKey: 'drops', intervalMs: 2 * HOUR, steps: [{ name: 'A' }, { name: 'B' }], stepSpacingMs: 10 * MINUTE, mergeable: false }),
-        makeMed({ id: 2, medKey: 'stomach capsule', intervalMs: 12 * HOUR, minGapMs: 10 * HOUR }),
+        makeMed({ id: 2, medKey: 'stomach', intervalMs: 12 * HOUR, minGapMs: 10 * HOUR }),
       ],
       chats: [makeChat({ chatId: 100 }), makeChat({ chatId: 200, role: 'caregiver', escalationTier: 1 })],
     });

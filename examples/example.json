@@ -1,0 +1,88 @@
+{
+  "_comment": "A worked example. Invented, not anyone's prescription — it exists to show every feature of the format in one place: a spacing group, a tapering course, meal-relative dosing and an as-needed medicine.",
+
+  "version": 1,
+  "patient": "Example Patient",
+  "timezone": "Asia/Dhaka",
+
+  "day": {
+    "morning_poll_at": "06:30",
+    "presumed_wake_at": "09:00",
+    "evening_poll_at": "22:30",
+    "presumed_sleep_at": "01:00",
+    "digest_at": "21:30"
+  },
+
+  "meals": [
+    { "id": "breakfast", "typical_local": "08:30", "ask_after_local": "09:30", "presume_at_local": "11:30" },
+    { "id": "lunch", "typical_local": "13:30", "ask_after_local": "14:30", "presume_at_local": "16:30" },
+    { "id": "dinner", "typical_local": "20:30", "ask_after_local": "21:30", "presume_at_local": "23:30" }
+  ],
+
+  "groups": [
+    { "id": "drops", "spacing": "10m" }
+  ],
+
+  "medicines": [
+    {
+      "_comment": "Four times across the waking day. Shares a spacing group, so it is never asked for within ten minutes of another drop.",
+      "id": "antibiotic_drop",
+      "name": "Antibiotic eye drop",
+      "dose": "1 drop, affected eye",
+      "schedule": { "type": "times_per_day", "n": 4 },
+      "group": "drops",
+      "group_seq": 1,
+      "course": { "days": 14 }
+    },
+    {
+      "_comment": "A taper: four times a day for a week, then three times a day for a week. Common for steroids, and impossible to express without phases.",
+      "id": "steroid_drop",
+      "name": "Steroid eye drop",
+      "dose": "1 drop, affected eye",
+      "group": "drops",
+      "group_seq": 2,
+      "phases": [
+        { "schedule": { "type": "times_per_day", "n": 4 }, "days": 7, "label": "4 times a day" },
+        { "schedule": { "type": "times_per_day", "n": 3 }, "days": 7, "label": "3 times a day" }
+      ]
+    },
+    {
+      "_comment": "Two-hourly and ongoing. Note it keeps its own schedule despite sharing the spacing group.",
+      "id": "lubricant_drop",
+      "name": "Lubricating eye drop",
+      "dose": "1 drop, affected eye",
+      "schedule": { "type": "interval", "every": "2h", "anchor": "wake" },
+      "min_gap": "90m",
+      "group": "drops",
+      "group_seq": 3
+    },
+    {
+      "_comment": "Before food actually matters for this one, so it carries an offset.",
+      "id": "stomach_capsule",
+      "name": "Stomach protection capsule",
+      "dose": "1 capsule",
+      "pattern": "1+0+1",
+      "relation": "before",
+      "offset": "30m",
+      "course": { "days": 3 }
+    },
+    {
+      "_comment": "With food, so no offset — inventing a delay would be its own kind of wrong.",
+      "id": "anti_inflammatory",
+      "name": "Anti-inflammatory tablet",
+      "dose": "1 tablet",
+      "pattern": "1+0+1",
+      "relation": "after",
+      "course": { "days": 3 }
+    },
+    {
+      "_comment": "Never fires on its own. /took records it against the gap and the daily cap.",
+      "id": "painkiller",
+      "name": "Painkiller",
+      "dose": "1 tablet",
+      "schedule": { "type": "as_needed" },
+      "min_gap": "6h",
+      "max_per_day": 4
+    }
+  ]
+}

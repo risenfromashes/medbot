@@ -48,8 +48,8 @@ describe('parseTime', () => {
 
 describe('splitTrailingTime', () => {
   it('separates a medicine name from a trailing time', () => {
-    const r = splitTrailingTime('antibiotic drop 5pm', NOW, z);
-    expect(r.head).toBe('antibiotic drop');
+    const r = splitTrailingTime('drop_a 5pm', NOW, z);
+    expect(r.head).toBe('drop_a');
     expect(r.time!.at).toBe(at('2026-09-14', '17:00'));
   });
 
@@ -60,8 +60,8 @@ describe('splitTrailingTime', () => {
   });
 
   it('leaves a bare name alone', () => {
-    const r = splitTrailingTime('antibiotic drop', NOW, z);
-    expect(r.head).toBe('antibiotic drop');
+    const r = splitTrailingTime('drop_a', NOW, z);
+    expect(r.head).toBe('drop_a');
     expect(r.time).toBeNull();
   });
 });

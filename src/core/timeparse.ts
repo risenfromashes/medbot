@@ -120,7 +120,7 @@ function parseWallish(s: string): { h: number; mi: number } | null {
   return null;
 }
 
-/** Split a trailing time expression off a command argument: 'antibiotic drop 5pm' -> ['antibiotic drop', '5pm']. */
+/** Split a trailing time expression off a command argument: 'drop_a 5pm' -> ['drop_a', '5pm']. */
 export function splitTrailingTime(
   args: string,
   now: number,

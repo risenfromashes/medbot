@@ -102,7 +102,7 @@ it will say which medicine and which field, so you can go back and fix it.
 >   wake the patient.
 > - If the prescription is ambiguous, choose the safer reading and say so in a `"notes"`
 >   field on that medicine.
-> - Use IDs that are short, lowercase and meaningful (`antibiotic drop`, `stomach capsule`, `painkiller`).
+> - Use IDs that are short, lowercase and meaningful (`drop_a`, `stomach_capsule`, `painkiller`).
 
 ---
 

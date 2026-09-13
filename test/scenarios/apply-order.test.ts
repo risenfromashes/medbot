@@ -21,7 +21,7 @@ describe('action ordering against the one-live-dose constraint', () => {
         wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'),
         lastWakeAt: at(0, '07:00'), presumedSleepAt: '23:59', eveningPollAt: '23:50',
       },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE })],
       chats: [makeChat({ chatId: 100 })],
     });
 
@@ -64,13 +64,13 @@ describe('action ordering against the one-live-dose constraint', () => {
         wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'),
         lastWakeAt: at(0, '07:00'), presumedSleepAt: '23:59', eveningPollAt: '23:50',
       },
-      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE })],
+      meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR, minGapMs: 90 * MINUTE })],
       chats: [makeChat({ chatId: 100 })],
     });
     w.respectSchedule = true;
     w.run(8 * HOUR);
 
-    expect(w.countByStatus('antibiotic drop', 'missed')).toBeGreaterThanOrEqual(2);
+    expect(w.countByStatus('drop_a', 'missed')).toBeGreaterThanOrEqual(2);
     expect(w.state.liveDoses.length, 'medicine wedged after rolling forward').toBe(1);
   });
 });

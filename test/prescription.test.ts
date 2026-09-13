@@ -7,7 +7,7 @@ const NOW = Date.UTC(2026, 8, 14, 12);
 const load = (p: string): unknown => JSON.parse(readFileSync(p, 'utf8'));
 
 describe('the real prescription', () => {
-  const r = parsePrescription(load('examples/eye-drops.json'), { now: NOW });
+  const r = parsePrescription(load('examples/example.json'), { now: NOW });
 
   it('parses without errors', () => {
     expect(r.errors).toEqual([]);
@@ -15,10 +15,10 @@ describe('the real prescription', () => {
   });
 
   it('keeps each eye drop on its own schedule, constrained to stay 10 minutes apart', () => {
-    // The three drops in a real post-operative prescription have genuinely different
+    // Drops needing a gap between them often have genuinely different
     // frequencies. Merging them into one medicine -- the original design -- silently
     // rewrote two of the three, so they stay separate and the gap is a constraint.
-    const drops = r.value!.meds.filter((m) => m.spacingGroup === 'eye_drops');
+    const drops = r.value!.meds.filter((m) => m.spacingGroup === 'drops');
     expect(drops.length).toBe(3);
     for (const d of drops) {
       expect(d.spacingMs).toBe(10 * MINUTE);
@@ -26,16 +26,18 @@ describe('the real prescription', () => {
       expect(d.mergeable).toBe(false);
     }
     // And each keeps its own course, rather than inheriting the first one's.
+    // Each keeps its own course rather than inheriting the first one's.
     const byKey = new Map(drops.map((d) => [d.medKey, d]));
-    expect(byKey.get('antibiotic drop')!.courseDays).toBe(7);
-    expect(byKey.get('lubricant')!.courseDays).toBe(14);
+    expect(byKey.get('antibiotic_drop')!.courseDays).toBe(14);
+    expect(byKey.get('steroid_drop')!.courseDays).toBe(14);
+    expect(byKey.get('lubricant_drop')!.courseKind).toBe('indefinite');
   });
 
   it('keeps the standalone medicines separate', () => {
     const keys = r.value!.meds.map((m) => m.medKey).sort();
-    expect(keys).toEqual(['lubricant', 'antibiotic drop', 'stomach capsule', 'painkiller', 'steroid drop']);
-    const stomach capsule = r.value!.meds.find((m) => m.medKey === 'stomach capsule')!;
-    expect(describeSchedule(stomach capsule)).toBe('30 min before breakfast');
+    expect(keys).toEqual(['anti_inflammatory', 'antibiotic_drop', 'lubricant_drop', 'painkiller', 'steroid_drop', 'stomach_capsule']);
+    const stomach = r.value!.meds.find((m) => m.medKey === 'stomach_capsule')!;
+    expect(describeSchedule(stomach)).toBe('30 min before breakfast and dinner');
     const para = r.value!.meds.find((m) => m.medKey === 'painkiller')!;
     expect(para.kind).toBe('as_needed');
     expect(para.maxPerDay).toBe(4);
@@ -45,10 +47,10 @@ describe('the real prescription', () => {
 describe('error reporting', () => {
   it('names the medicine and the field it could not read', () => {
     const r = parsePrescription({
-      medicines: [{ name: 'antibiotic drop', schedule: { type: 'interval', every: 'twice' } }],
+      medicines: [{ name: 'Antibiotic drop', schedule: { type: 'interval', every: 'twice' } }],
     }, { now: NOW });
     expect(r.ok).toBe(false);
-    expect(r.errors.join('\n')).toContain('antibiotic drop');
+    expect(r.errors.join('\n')).toContain('Antibiotic drop');
     expect(r.errors.join('\n')).toContain('every');
   });
 
@@ -80,7 +82,7 @@ describe('prescription shorthands', () => {
     // Genuinely tied to the meals, not flattened to clock times standing in for them --
     // so the dose follows whenever the patient says they are actually eating.
     const r = parsePrescription({
-      medicines: [{ id: 'x', name: 'Losartan', pattern: '1+0+1' }],
+      medicines: [{ id: 'x', name: 'Blood pressure tablet', pattern: '1+0+1' }],
     }, { now: NOW });
     expect(r.ok).toBe(true);
     const m = r.value!.meds[0]!;

@@ -2,15 +2,15 @@
 
 A Telegram bot that nags you to take your medicine until you actually say you have.
 
-This started with an eye prescription: three different drops, ten minutes apart, every two
-hours, for a week. Phone alarms were useless for it. They go off on a fixed schedule
-whether you woke up at six or at ten, they can't tell you *which* drop to put in, and they
-have no idea whether you got up and did it or rolled over and went back to sleep. By day
-three you've lost track of whether you took the four o'clock one.
+Some prescriptions are genuinely hard to follow. Three different eye drops, ten minutes
+apart, every two hours, for a week — phone alarms are useless for that. They go off on a
+fixed schedule whether you woke at six or at ten, they can't tell you *which* drop to put
+in, and they have no idea whether you got up and did it or rolled over and went back to
+sleep. By day three you've lost track of whether you took the four o'clock one.
 
 So medbot works the way the prescription actually reads. It waits until you're up before
 starting the day. It knows the drops need ten minutes between them, and it counts those ten
-minutes from when you actually took the last one. It knows the stomach capsule goes half an hour
+minutes from when you actually took the last one. It knows the stomach_capsule goes half an hour
 before breakfast. And it keeps asking — politely at first, then less so — until you tell it
 you've taken the thing.
 
@@ -107,10 +107,10 @@ Most of the time you just tap the buttons on the reminder. When you'd rather typ
 ```
 /status                 what's waiting, what's coming
 /awake      /sleep      start and end your day
-/took antibiotic drop              took it just now
-/took antibiotic drop 5pm          took it earlier — it'll fix the schedule
-/skip antibiotic drop              not taking this one
-/snooze antibiotic drop 15m        ask me again shortly
+/took drop_a              took it just now
+/took drop_a 5pm          took it earlier — it'll fix the schedule
+/skip drop_a              not taking this one
+/snooze drop_a 15m        ask me again shortly
 /ate lunch              for the ones tied to meals
 /meds                   what you're on and how far through
 /log                    how you've been doing
@@ -118,11 +118,11 @@ Most of the time you just tap the buttons on the reminder. When you'd rather typ
 
 Two things worth knowing:
 
-**If you took it and forgot to tap, just say so.** `/took antibiotic drop 5pm` works even if the bot
+**If you took it and forgot to tap, just say so.** `/took drop_a 5pm` works even if the bot
 already gave up and logged that dose as missed. It'll correct the record and recalculate
 everything from the real time.
 
-**Changing things doesn't mean touching code.** `/edit antibiotic drop every 3h`, `/extend antibiotic drop 3d`,
+**Changing things doesn't mean touching code.** `/edit drop_a every 3h`, `/extend drop_a 3d`,
 `/pause`, `/stop`, `/add`, or `/import` a whole new prescription. All from your phone.
 
 ---
@@ -148,7 +148,7 @@ Other bits and pieces:
 - [docs/LLM_PROMPT.md](docs/LLM_PROMPT.md) — the prescription-to-JSON prompt, if you'd
   rather copy it from here than from the bot
 - [schema/prescription.schema.json](schema/prescription.schema.json) — the full format
-- [examples/eye-drops.json](examples/eye-drops.json) — a worked example
+- [examples/example.json](examples/example.json) — a worked example
 
 ## Licence
 

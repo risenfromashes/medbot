@@ -11,7 +11,7 @@ const at = (day: number, hhmm: string): number => z.wallOnDayUtc(z.addLocalDays(
  * Driven by the same JSON a patient would actually import, so these assert the real
  * prescription's behaviour rather than a convenient approximation of it.
  */
-const rx = parsePrescription(JSON.parse(readFileSync('examples/post-op-eye.json', 'utf8')), { now: at(0, '06:00') });
+const rx = parsePrescription(JSON.parse(readFileSync('examples/example.json', 'utf8')), { now: at(0, '06:00') });
 
 function newDay(opts: { start: number } = { start: at(0, '05:00') }): World {
   const w = new World({
@@ -72,7 +72,7 @@ describe('waking at noon', () => {
     for (let i = 0; i < 12 * 60; i++) {
       w.tick();
       const pending = w.state.liveDoses.find(
-        (d) => (d.status === 'prompted' || d.status === 'due') && w.med('drop').id === d.medId,
+        (d) => (d.status === 'prompted' || d.status === 'due') && w.med('lubricant_drop').id === d.medId,
       );
       if (pending !== undefined) {
         w.resolve(pending.id, 'taken');
@@ -123,7 +123,7 @@ describe('being a bit late', () => {
     w.declare('wake');
     w.run(2 * MINUTE);
 
-    const first = w.state.liveDoses.find((d) => d.medId === w.med('drop').id)!;
+    const first = w.state.liveDoses.find((d) => d.medId === w.med('antibiotic_drop').id)!;
     const plannedFirst = first.plannedDueAt;
 
     // Answer 15 minutes late -- inside the half-hour tolerance.
@@ -132,10 +132,10 @@ describe('being a bit late', () => {
     w.resolve(first.id, 'taken');
     w.run(MINUTE);
 
-    const next = w.state.liveDoses.find((d) => d.medId === w.med('drop').id)!;
+    const next = w.state.liveDoses.find((d) => d.medId === w.med('antibiotic_drop').id)!;
     // The grid holds: the next dose is a full interval after the PLANNED time, so a
     // quarter of an hour's lateness has not walked the whole day forwards.
-    expect(next.plannedDueAt).toBe(plannedFirst + w.med('drop').intervalMs!);
+    expect(next.plannedDueAt).toBe(plannedFirst + w.med('antibiotic_drop').intervalMs!);
   });
 
   it('re-bases on the real time when the delay is substantial', () => {
@@ -144,20 +144,20 @@ describe('being a bit late', () => {
     w.declare('wake');
     w.run(2 * MINUTE);
 
-    const first = w.state.liveDoses.find((d) => d.medId === w.med('drop').id)!;
+    const first = w.state.liveDoses.find((d) => d.medId === w.med('antibiotic_drop').id)!;
     const plannedFirst = first.plannedDueAt;
 
     // Two hours late -- a genuinely missed-then-taken dose.
     w.now = plannedFirst + 2 * HOUR;
     w.tick();
-    const stillPending = w.state.liveDoses.find((d) => d.medId === w.med('drop').id);
+    const stillPending = w.state.liveDoses.find((d) => d.medId === w.med('antibiotic_drop').id);
     if (stillPending !== undefined) w.resolve(stillPending.id, 'taken');
     const actuallyTaken = w.now;
     w.run(MINUTE);
 
-    const next = w.state.liveDoses.find((d) => d.medId === w.med('drop').id)!;
+    const next = w.state.liveDoses.find((d) => d.medId === w.med('antibiotic_drop').id)!;
     // Counted from when she really took it, not from the abandoned slot.
-    expect(next.effectiveDueAt).toBeGreaterThanOrEqual(actuallyTaken + w.med('drop').intervalMs! - MINUTE);
+    expect(next.effectiveDueAt).toBeGreaterThanOrEqual(actuallyTaken + w.med('antibiotic_drop').intervalMs! - MINUTE);
   });
 
   it('keeps nagging in between rather than going quiet', () => {
@@ -243,12 +243,12 @@ describe('the questions it asks, beyond medicines', () => {
     w.declare('wake');
     w.run(4 * HOUR);
 
-    const stomach capsule = w.allDoses.filter((d) => d.medId === w.med('stomach capsule').id);
-    const flexi = w.allDoses.filter((d) => d.medId === w.med('flexi').id);
-    expect(stomach capsule.length, 'the before-meal tablet was never scheduled').toBeGreaterThan(0);
-    expect(flexi.length, 'the after-meal tablet was never scheduled').toBeGreaterThan(0);
+    const stomach_capsule = w.allDoses.filter((d) => d.medId === w.med('stomach_capsule').id);
+    const anti_inflammatory = w.allDoses.filter((d) => d.medId === w.med('anti_inflammatory').id);
+    expect(stomach_capsule.length, 'the before-meal tablet was never scheduled').toBeGreaterThan(0);
+    expect(anti_inflammatory.length, 'the after-meal tablet was never scheduled').toBeGreaterThan(0);
     // Before-meal comes first, and they are not the same moment.
-    expect(stomach capsule[0]!.plannedDueAt).toBeLessThan(flexi[0]!.plannedDueAt);
+    expect(stomach_capsule[0]!.plannedDueAt).toBeLessThan(anti_inflammatory[0]!.plannedDueAt);
   });
 });
 
@@ -272,7 +272,7 @@ describe('a full day, end to end', () => {
     }
 
     // Something was taken from every active medicine that could fire this afternoon.
-    for (const key of ['drop', 'drop', 'drop']) {
+    for (const key of ['antibiotic_drop', 'steroid_drop', 'lubricant_drop']) {
       expect(w.takenTimes(key).length, `${key} was never taken after waking at noon`).toBeGreaterThan(0);
     }
     // Nothing scheduled before she was up.
@@ -302,7 +302,7 @@ describe('eye drops the moment she is up', () => {
         s.doseIds.some((id) => {
           const d = w.allDoses.find((x) => x.id === id);
           const m = d === undefined ? undefined : w.state.meds.find((mm) => mm.id === d.medId);
-          return m?.spacingGroup === 'eye_drops';
+          return m?.spacingGroup === 'drops';
         }),
     );
     expect(firstDrop, 'no eye drop was asked for after waking').toBeDefined();
@@ -320,7 +320,7 @@ describe('eye drops the moment she is up', () => {
     w.run(5 * MINUTE);
 
     const drops = w.state.liveDoses
-      .filter((d) => w.state.meds.find((m) => m.id === d.medId)?.spacingGroup === 'eye_drops')
+      .filter((d) => w.state.meds.find((m) => m.id === d.medId)?.spacingGroup === 'drops')
       .map((d) => d.effectiveDueAt)
       .sort((a, b) => a - b);
 
@@ -366,7 +366,7 @@ describe('the safety floor still applies on waking', () => {
 
     // A drop at 02:00, then straight back to sleep, up again at 04:00.
     const pending = w.state.liveDoses.find(
-      (d) => w.state.meds.find((m) => m.id === d.medId)?.medKey === 'drop',
+      (d) => w.state.meds.find((m) => m.id === d.medId)?.medKey === 'lubricant_drop',
     );
     if (pending !== undefined) w.resolve(pending.id, 'taken');
 
@@ -377,11 +377,11 @@ describe('the safety floor still applies on waking', () => {
     w.run(5 * MINUTE);
 
     const next = w.state.liveDoses.find(
-      (d) => w.state.meds.find((m) => m.id === d.medId)?.medKey === 'drop',
+      (d) => w.state.meds.find((m) => m.id === d.medId)?.medKey === 'lubricant_drop',
     );
     expect(next, 'the drop disappeared entirely').toBeDefined();
     // Waking does not override the minimum gap -- that is the one rule nothing may break.
-    const minGap = w.med('drop').minGapMs;
+    const minGap = w.med('lubricant_drop').minGapMs;
     expect(
       next!.effectiveDueAt,
       'waking up was allowed to short-circuit the safety gap',
