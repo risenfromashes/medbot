@@ -342,7 +342,7 @@ export function parsePrescription(raw: unknown, opts: { now: number } = { now: D
   // The first design folded a group into one medicine with ordered steps, on the
   // assumption that drops needing a gap between them share a schedule. A real
   //  prescription disproved that: three drops needing ten minutes apart,
-  // one four times a day for 14 days, one four times a day for 7, and a drop_c every
+  // one four times a day for 14 days, one four times a day for 7, and a lubricant every
   // two hours indefinitely. Folding silently rewrote two of the three. So each keeps its
   // own schedule and its own course, and the planner simply refuses to prompt two members
   // within the gap.

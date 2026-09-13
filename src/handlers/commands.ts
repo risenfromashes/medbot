@@ -24,19 +24,19 @@ import { encodeCallback } from '../core/callbackCodec.js';
 
 export const COMMANDS = [
   { command: 'status', description: "What's pending and what's next" },
-  { command: 'took', description: 'Log a dose — optionally at a past time, e.g. /took drop_a 5pm' },
+  { command: 'took', description: 'Log a dose — optionally at a past time, e.g. /took drops 5pm' },
   { command: 'awake', description: "Start the day (accepts a time, e.g. /awake 6:30am)" },
   { command: 'sleep', description: 'End the day' },
   { command: 'ate', description: 'Record a meal, e.g. /ate lunch 1pm' },
   { command: 'eating', description: "Say when you'll eat, e.g. /eating lunch in 1h" },
   { command: 'meds', description: 'List medicines and their schedules' },
   { command: 'skip', description: 'Skip the pending dose of a medicine' },
-  { command: 'snooze', description: 'Push a reminder back, e.g. /snooze drop_a 15m' },
+  { command: 'snooze', description: 'Push a reminder back, e.g. /snooze drops 15m' },
   { command: 'undo', description: 'Reverse the last thing you logged' },
   { command: 'import', description: 'Load a prescription (paste or attach the JSON)' },
   { command: 'prompt', description: 'Get the prompt for turning a prescription photo into JSON' },
-  { command: 'edit', description: 'Change a medicine, e.g. /edit drop_a every 3h' },
-  { command: 'extend', description: 'Add days to a course, e.g. /extend drop_a 3d' },
+  { command: 'edit', description: 'Change a medicine, e.g. /edit drops perday 3' },
+  { command: 'extend', description: 'Add days to a course, e.g. /extend drops 3d' },
   { command: 'export', description: 'Get the current prescription back as JSON' },
   { command: 'log', description: 'Recent adherence' },
   { command: 'pause', description: 'Pause a medicine' },
@@ -559,7 +559,7 @@ async function cmdTook(ctx: CmdCtx, args: string): Promise<void> {
       if (live !== null && (live.status === 'due' || live.status === 'prompted')) pending.push(med);
     }
     if (pending.length === 0) {
-      await reply(ctx, "Nothing is pending right now. Name the medicine if you're logging something else: <code>/took drop_a 5pm</code>");
+      await reply(ctx, "Nothing is pending right now. Name the medicine if you're logging something else: <code>/took drops 5pm</code>");
       return;
     }
     if (pending.length > 1) {
@@ -709,8 +709,8 @@ async function cmdUndo(ctx: CmdCtx): Promise<void> {
   await reply(
     ctx,
     'To correct something, just state the truth and I\'ll fix the schedule:\n' +
-      '• <code>/took drop_a 5pm</code> — even if I already logged it as missed\n' +
-      '• <code>/skip drop_a</code> — if you decided not to take it\n' +
+      '• <code>/took drops 5pm</code> — even if I already logged it as missed\n' +
+      '• <code>/skip drops</code> — if you decided not to take it\n' +
       '• <code>/awake 6:30am</code> — if I started the day at the wrong time',
   );
 }
@@ -1071,15 +1071,15 @@ async function cmdEdit(ctx: CmdCtx, args: string): Promise<void> {
 
   const usage =
     '<b>Changing a medicine</b>\n' +
-    '<code>/edit drop_a every 3h</code> — dosing interval\n' +
-    '<code>/edit drop_a times 08:00,20:00</code> — fixed clock times\n' +
-    '<code>/edit drop_a dose 2 drops</code> — what to take\n' +
-    '<code>/edit drop_a name Antibiotic drop</code>\n' +
-    '<code>/edit drop_a mingap 90m</code> — minimum safe gap\n' +
-    '<code>/edit drop_a spacing 15m</code> — gap between drops in a group\n' +
-    '<code>/edit drop_a maxperday 4</code>\n' +
-    '<code>/edit drop_a critical on</code> — may wake you at night\n' +
-    '<code>/edit drop_a note Shake well</code>\n\n' +
+    '<code>/edit drops every 3h</code> — dosing interval\n' +
+    '<code>/edit drops times 08:00,20:00</code> — fixed clock times\n' +
+    '<code>/edit drops dose 2 drops</code> — what to take\n' +
+    '<code>/edit drops name Antibiotic drop</code>\n' +
+    '<code>/edit drops mingap 90m</code> — minimum safe gap\n' +
+    '<code>/edit drops spacing 15m</code> — gap between drops in a group\n' +
+    '<code>/edit drops maxperday 4</code>\n' +
+    '<code>/edit drops critical on</code> — may wake you at night\n' +
+    '<code>/edit drops note Shake well</code>\n\n' +
     'To change more than one thing, /import the whole prescription again.';
 
   const meds = await ctx.db.medsFor(ap.patient.id, true);
@@ -1168,7 +1168,7 @@ async function cmdEdit(ctx: CmdCtx, args: string): Promise<void> {
         }
       }
       if (times.length === 0) {
-        await reply(ctx, 'Give me at least one time, e.g. <code>/edit drop_a times 08:00,20:00</code>');
+        await reply(ctx, 'Give me at least one time, e.g. <code>/edit drops times 08:00,20:00</code>');
         return;
       }
       times.sort();
@@ -1276,7 +1276,7 @@ async function cmdExtend(ctx: CmdCtx, args: string): Promise<void> {
 
   const parts = args.trim().split(/\s+/).filter((x) => x !== '');
   if (parts.length < 2) {
-    await reply(ctx, 'How much longer? e.g. <code>/extend drop_a 3d</code>');
+    await reply(ctx, 'How much longer? e.g. <code>/extend drops 3d</code>');
     return;
   }
   const meds = await ctx.db.medsFor(ap.patient.id, true);
@@ -1544,10 +1544,10 @@ async function cmdHelp(ctx: CmdCtx): Promise<void> {
 
 <b>Logging a dose</b>
 Tap ✅ on the reminder, or:
-<code>/took drop_a</code> — right now
-<code>/took drop_a 5pm</code> — earlier, and I'll fix the schedule
-<code>/took drop_a 20m ago</code>
-<code>/skip drop_a</code> · <code>/snooze drop_a 15m</code>
+<code>/took drops</code> — right now
+<code>/took drops 5pm</code> — earlier, and I'll fix the schedule
+<code>/took drops 20m ago</code>
+<code>/skip drops</code> · <code>/snooze drops 15m</code>
 
 If I already logged a dose as missed and you actually took it, just tell me the real time — I'll correct it and recalculate from there.
 
@@ -1555,8 +1555,8 @@ If I already logged a dose as missed and you actually took it, just tell me the 
 <code>/prompt</code> — get the prompt for turning a photo into JSON
 <code>/import</code> — send new JSON (I preview it and wait for confirmation)
 <code>/add {...}</code> — add one medicine
-<code>/edit drop_a every 3h</code> — change one thing
-<code>/extend drop_a 3d</code> — lengthen a course
+<code>/edit drops every 3h</code> — change one thing
+<code>/extend drops 3d</code> — lengthen a course
 <code>/meds</code> · <code>/export</code> · <code>/pause</code> · <code>/resume</code> · <code>/stop</code>
 <code>/log 7</code> — adherence · <code>/tz Asia/Dhaka</code>
 

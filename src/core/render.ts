@@ -255,7 +255,7 @@ export function renderCollapsed(medLabel: string, z: Zone, dueAt: number): strin
 /**
  * The tap-through editor.
  *
- * `/edit drop_a every 3h` is precise but assumes you remember the syntax. For the handful of
+ * `/edit <med> every 3h` is precise but assumes you remember the syntax. For the handful of
  * changes people actually make mid-course, offering the plausible values as buttons means
  * nobody has to memorise anything -- which is the whole point of keeping the prescription
  * out of the source code.

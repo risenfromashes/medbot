@@ -4,7 +4,7 @@
  * A prescription that says "please give 10 minutes between two drops" is not saying the
  * drops share a schedule -- it is saying that whenever two of them coincide, separate
  * them. Real  eye prescriptions routinely pair a drop four times a day with
- * a drop_c every two hours, both needing that gap.
+ * a lubricant every two hours, both needing that gap.
  *
  * So this is a constraint applied after each medicine has computed its own due time,
  * rather than a merge that would force them onto one frequency. Pure, like everything

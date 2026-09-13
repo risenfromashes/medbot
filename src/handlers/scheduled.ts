@@ -14,6 +14,7 @@ import { Telegram } from '../io/telegram.js';
 import { dispatch, clearPromptMessages, flushOutbox } from './dispatch.js';
 import type { Env } from '../types.js';
 import { COMMANDS } from './commands.js';
+import { hashString } from '../core/prescription.js';
 
 /** Subrequest budget. The platform allows 50; leave headroom for bookkeeping. */
 const MAX_TELEGRAM_CALLS = 40;
@@ -23,6 +24,7 @@ export async function runTick(env: Env, now: number): Promise<{ patients: number
   const tg = new Telegram(env.TELEGRAM_BOT_TOKEN, MAX_TELEGRAM_CALLS);
 
   await ensureWebhook(env, db, tg, now);
+  await ensureCommandMenu(db, tg, now);
 
   // Anything queued by an earlier tick goes first: it is already late.
   const flushed = await flushOutbox({ db, tg, z: zoneFor('UTC'), now }, MAX_TELEGRAM_CALLS);
@@ -72,6 +74,37 @@ export async function runTick(env: Env, now: number): Promise<{ patients: number
 }
 
 /**
+ * Keep the published command menu in step with the code.
+ *
+ * Telegram caches whatever `setMyCommands` last sent, and that used to happen only when
+ * the webhook was registered. So a deploy that added a command left it invisible: it
+ * worked if you typed it, but it was not in the menu and nobody knew it existed. Keyed on
+ * a hash of the list, so this costs one cheap comparison an hour and one API call on the
+ * deploy that actually changes something.
+ */
+async function ensureCommandMenu(db: Db, tg: Telegram, now: number): Promise<void> {
+  const want = hashString(JSON.stringify(COMMANDS));
+  const have = await db.kvGet('commands_hash');
+  if (have === want) return;
+
+  // Back off only after a failure. Throttling successes too would mean a second change
+  // within the window is silently ignored -- the same invisible-command problem this
+  // function exists to prevent.
+  const lastFailed = Number((await db.kvGet('commands_failed_at')) ?? '0');
+  if (now - lastFailed < 10 * 60_000) return;
+
+  const res = await tg.setMyCommands(COMMANDS);
+  if (res.ok) {
+    await db.kvSet('commands_hash', want);
+    await db.kvSet('commands_failed_at', '0');
+    await db.audit(null, 'commands_published', 'system', { count: COMMANDS.length }, now);
+  } else {
+    await db.kvSet('commands_failed_at', String(now));
+    await db.audit(null, 'commands_publish_failed', 'system', { error: res.error }, now);
+  }
+}
+
+/**
  * Keep the webhook registered without anyone having to run curl.
  *
  * Telegram drops a webhook it cannot deliver to, and a fresh deployment has none at all,
@@ -91,5 +124,4 @@ async function ensureWebhook(env: Env, db: Db, tg: Telegram, now: number): Promi
 
   const res = await tg.setWebhook(want, env.WEBHOOK_SECRET);
   await db.audit(null, 'webhook_registered', 'system', { url: want, ok: res.ok, error: res.error }, now);
-  if (res.ok) await tg.setMyCommands(COMMANDS);
 }
