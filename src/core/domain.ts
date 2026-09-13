@@ -133,6 +133,12 @@ export interface MedSpec {
   anchor?: 'wake' | 'clock';
   times?: string[];
   meal?: MealRef;
+  /**
+   * Several meals a day -- "1+0+1 before food" is one medicine tied to both breakfast and
+   * dinner. Each dose anchors on whichever of them comes next, so the tablet follows the
+   * meals the patient actually reports rather than a clock time standing in for them.
+   */
+  meals?: MealRef[];
 }
 
 /**
@@ -270,10 +276,18 @@ export interface Chat {
 export interface MealDef {
   patientId: number;
   meal: string;
-  /** Drives "30 min before breakfast", which cannot wait for a confirmation. */
+  /** A hint of last resort, used only when there is nothing better to go on. */
   typicalLocal: string;
   askAfterLocal: string;
   presumeAtLocal: string | null;
+  /**
+   * When to first ask about this meal, measured from waking rather than from the clock.
+   * Someone who gets up at noon is not late for breakfast.
+   */
+  afterWakeMs: number | null;
+  /** And not sooner than this after the previous meal, so questions do not bunch up. */
+  minGapAfterPrevMs: number;
+  seq: number;
 }
 
 export interface MealEvent {
@@ -281,7 +295,10 @@ export interface MealEvent {
   meal: string;
   localDay: LocalDay;
   at: number;
-  source: 'confirmed' | 'presumed' | 'skipped';
+  /** `planned` is what the patient said they were about to do; the rest is what happened. */
+  source: 'planned' | 'confirmed' | 'presumed' | 'skipped';
+  plannedAt: number | null;
+  askedAt: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +313,13 @@ export interface PromptBody {
   /** Doses covered, for a dose prompt. Several when unspaced medicines merge. */
   doseIds: number[];
   meal?: string;
+  /**
+   * Which question is being asked about the meal: when are you eating, or are you eating
+   * now. The first is what makes "half an hour before breakfast" schedulable at all.
+   */
+  stage?: 'plan' | 'confirm';
+  /** For a dose prompt tied to an upcoming meal, so the message can say why. */
+  beforeMeal?: { meal: string; inMs: number };
   text?: string;
 }
 
@@ -371,7 +395,15 @@ export type Action =
   | { t: 'nudgePrompt'; promptId: number; at: number }
   | { t: 'escalatePrompt'; promptId: number; tier: number; at: number }
   | { t: 'closePrompt'; promptId: number; state: PromptState; at: number }
-  | { t: 'recordMeal'; meal: string; localDay: LocalDay; at: number; source: MealEvent['source'] }
+  | {
+      t: 'recordMeal';
+      meal: string;
+      localDay: LocalDay;
+      at: number;
+      source: MealEvent['source'];
+      plannedAt?: number | null;
+    }
+  | { t: 'closeMealPrompt'; meal: string }
   | { t: 'setNextAction'; at: number | null }
   /** A message that needs no answer: digests, watchdog alerts, course completions. */
   | { t: 'sendInfo'; text: string; tier: number; dedupe: string; priority?: number }

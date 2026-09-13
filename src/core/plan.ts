@@ -17,6 +17,7 @@ import { planWake } from './planWake.js';
 import { planReports } from './planReport.js';
 import { activePhase, courseComplete, effectiveMed, nextDue, reviveAtWake, rollForwardAfter } from './planSchedule.js';
 import { applySpacing } from './planGroups.js';
+import { sanitizeMedicine, sanitizePatient, saneNagSteps } from './sanitize.js';
 import { advanceMedicine } from './advance.js';
 import type { DayFacts } from './planSchedule.js';
 import type { Zone } from './tz.js';
@@ -29,7 +30,16 @@ import { MINUTE } from './tz.js';
  */
 const MERGE_WINDOW = 5 * MINUTE;
 
-export function plan(state: PatientState, now: number, z: Zone): Action[] {
+export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
+  // Everything downstream assumes sane numbers and readable times. One malformed row
+  // must not be able to throw, because an exception here means this patient silently
+  // stops being reminded and nothing says so.
+  const state: PatientState = {
+    ...rawState,
+    patient: sanitizePatient(rawState.patient),
+    meds: rawState.meds.map(sanitizeMedicine),
+  };
+
   const out: Action[] = [];
   const nextTemp = tempIds();
 
@@ -85,7 +95,8 @@ export function plan(state: PatientState, now: number, z: Zone): Action[] {
     today,
     wake.state === 'awake',
     emitWatching,
-    (meal) => findOpen('meal', meal) !== undefined,
+    (meal, stage) => openPrompts.some((q) => q.kind === 'meal' && q.body.meal === meal && q.body.stage === stage),
+    wake.wakeAnchor,
   );
   push(mealFacts.wakeAt);
 
@@ -98,6 +109,7 @@ export function plan(state: PatientState, now: number, z: Zone): Action[] {
     awake: wake.state === 'awake',
     localDay: today,
     meals: mealFacts.meals,
+    skipped: mealFacts.skipped,
   };
 
   // --- 3. per medicine: keep exactly one correctly-timed live dose --------
@@ -230,6 +242,48 @@ export function plan(state: PatientState, now: number, z: Zone): Action[] {
       };
     }
 
+    // A meal that is not happening cannot be waited on. Resolve whatever depended on it
+    // rather than leaving a dose hanging for the rest of the day.
+    if (med.kind === 'meal' && live.takenAt === null) {
+      const refs = med.spec.meals ?? (med.spec.meal === undefined ? [] : [med.spec.meal]);
+      const anchors = refs.filter((r) => !(facts.skipped?.has(r.meal) ?? false));
+      if (refs.length > 0 && anchors.length === 0) {
+        emit({
+          t: 'resolveDose', doseId: live.id, status: 'skipped', at: now,
+          takenAt: null, byChat: null, src: 'auto',
+        });
+        if (live.promptId !== null) {
+          emit({ t: 'closePrompt', promptId: live.promptId, state: 'resolved', at: now });
+        }
+        push(z.startOfLocalDay(z.addLocalDays(today, 1)));
+        continue;
+      }
+    }
+
+    // A meal-anchored dose was scheduled against whatever was known at the time -- very
+    // often a prediction, because the patient had not yet said when they were eating.
+    // Once they do say, the dose has to follow: a tablet meant for half an hour before
+    // breakfast is worthless if it stays pinned to a guess.
+    if (med.kind === 'meal' && live.status !== 'deferred' && live.takenAt === null) {
+      const desired = nextDue({ ...med, lastCycleStartAt: null, nextStep: 0 }, state, facts, now, z);
+      if (desired !== null && desired.blocked === undefined) {
+        const drift = Math.abs(desired.effectiveDueAt - live.effectiveDueAt);
+        if (drift > MINUTE && desired.effectiveDueAt >= (med.lastTakenAt ?? 0) + med.minGapMs) {
+          emit({
+            t: 'retimeDose',
+            doseId: live.id,
+            effectiveDueAt: desired.effectiveDueAt,
+            anchorKind: 'meal',
+          });
+          live = { ...live, effectiveDueAt: desired.effectiveDueAt, plannedDueAt: desired.plannedDueAt };
+          if (live.promptId !== null && desired.effectiveDueAt > now) {
+            emit({ t: 'closePrompt', promptId: live.promptId, state: 'cancelled', at: now });
+            live = { ...live, promptId: null, status: 'scheduled' };
+          }
+        }
+      }
+    }
+
     // The wake anchor may have moved since this dose was scheduled -- the patient was
     // presumed awake at nine and actually surfaced at noon. A dose still sitting on the
     // old anchor has to follow, or confirming "I'm up" would leave the morning's
@@ -323,7 +377,11 @@ export function plan(state: PatientState, now: number, z: Zone): Action[] {
   let bucket: Array<{ dose: Dose; med: Medicine }> = [];
   const flush = (): void => {
     if (bucket.length === 0) return;
-    const body: PromptBody = { kind: 'dose', doseIds: bucket.map((b) => b.dose.id) };
+    const body: PromptBody = {
+      kind: 'dose',
+      doseIds: bucket.map((b) => b.dose.id),
+      ...beforeMealContext(bucket[0]!.med, mealFacts, now),
+    };
     emit({ t: 'createPrompt', id: 0, kind: 'dose', body, tier: 0 });
     scheduleFollowUps(bucket[0]!.med);
     bucket = [];
@@ -341,7 +399,7 @@ export function plan(state: PatientState, now: number, z: Zone): Action[] {
       t: 'createPrompt',
       id: 0,
       kind: 'dose',
-      body: { kind: 'dose', doseIds: [r.dose.id] },
+      body: { kind: 'dose', doseIds: [r.dose.id], ...beforeMealContext(r.med, mealFacts, now) },
       tier: 0,
     });
     scheduleFollowUps(r.med);
@@ -355,7 +413,10 @@ export function plan(state: PatientState, now: number, z: Zone): Action[] {
     if (suppressed) continue;
 
     const policy = nagPolicyFor(prompt, state);
-    const stepMs = policy.stepsMs[Math.min(prompt.nudgeCount, policy.stepsMs.length - 1)] ?? 10 * MINUTE;
+    // An empty ladder would mean never following up, which is the one thing this must
+    // not do.
+    const steps = saneNagSteps(policy.stepsMs);
+    const stepMs = steps[Math.min(prompt.nudgeCount, steps.length - 1)] ?? 10 * MINUTE;
     const nextNudgeAt = (prompt.lastNudgeAt ?? prompt.createdAt) + stepMs;
 
     // Escalation is a property of the prompt, not of doses -- wake, sleep and meal
@@ -374,7 +435,7 @@ export function plan(state: PatientState, now: number, z: Zone): Action[] {
 
     if (now >= nextNudgeAt) {
       emit({ t: 'nudgePrompt', promptId: prompt.id, at: now });
-      const nextStep = policy.stepsMs[Math.min(prompt.nudgeCount + 1, policy.stepsMs.length - 1)] ?? stepMs;
+      const nextStep = steps[Math.min(prompt.nudgeCount + 1, steps.length - 1)] ?? stepMs;
       push(now + nextStep);
     } else {
       push(nextNudgeAt);
@@ -393,6 +454,25 @@ export function plan(state: PatientState, now: number, z: Zone): Action[] {
   // --- 6. when to wake up next -------------------------------------------
   emit({ t: 'setNextAction', at: wakeUps.length > 0 ? Math.min(...wakeUps) : null });
   return out;
+}
+
+/**
+ * If this dose is meant to be taken before a meal, say which meal and how soon -- "take
+ * this now, you're eating in about 30 minutes" is a reason, and a reason is what makes
+ * someone actually do it.
+ */
+function beforeMealContext(
+  med: Medicine,
+  mealFacts: { meals: Map<string, { at: number; confirmed: boolean; planned: boolean }> },
+  now: number,
+): { beforeMeal?: { meal: string; inMs: number } } {
+  const ref = med.spec.meal;
+  if (ref === undefined || ref.relation !== 'before') return {};
+  const m = mealFacts.meals.get(ref.meal);
+  if (m === undefined || !m.planned) return {};
+  const inMs = m.at - now;
+  if (inMs < 0 || inMs > 6 * 60 * 60_000) return {};
+  return { beforeMeal: { meal: ref.meal, inMs } };
 }
 
 function promptIsCritical(prompt: Prompt, state: PatientState): boolean {

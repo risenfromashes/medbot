@@ -141,11 +141,36 @@ silently recorded.
 
 ### Meals
 
-"Thirty minutes before breakfast" can't be scheduled from a confirmation — by the time you
-say you've eaten, the window has gone. So each meal has a *typical* time that before-doses
-fire against, a time to start asking whether you've eaten, and a time to give up asking and
-assume you did. After-doses wait for a real confirmation. "Skipping this meal" resolves
-anything depending on it rather than leaving it hanging.
+The bot does not assume when you eat. It asks, in advance, and works backwards.
+
+A fixed meal time fails twice over. It is simply wrong for someone recovering at home who
+woke at noon. And it makes "half an hour before food" unschedulable, because by the time
+you confirm you have eaten, that window has gone.
+
+So each meal runs through three states:
+
+1. **Asked.** A while after you wake -- measured from waking, not from the clock, and never
+   bunched against the previous meal -- it asks *when* you are having breakfast. Buttons
+   for "in 30 minutes", "in an hour", "in two hours", "eating now", "skipping it", or
+   `/eating breakfast in 1h`.
+2. **Planned.** Your answer fixes a time. Anything due before the meal is scheduled from
+   it, and its reminder says why: *"you said breakfast in about 30 minutes — this one goes
+   before it."* Change your mind and the tablets move with you.
+3. **Confirmed.** At the planned time it asks whether you are eating now. That releases
+   anything due after the meal.
+
+Every step has a fallback. A meal planned but never confirmed is presumed to have happened
+after a couple of hours, so an after-meal tablet is never stranded waiting for an answer
+that is not coming. A meal you say you are skipping resolves whatever depended on it rather
+than leaving it hanging, and the medicine returns tomorrow.
+
+Before you have said anything, a prediction stands in -- derived from your waking time, not
+from a clock -- so a before-meal tablet always has something to aim at. The moment you say
+when you are actually eating, the dose follows.
+
+The `1+0+1` shorthand produces a genuinely meal-tied medicine, anchored on breakfast and
+dinner, rather than clock times standing in for them. Each dose hangs off whichever meal
+comes next.
 
 ---
 
@@ -180,7 +205,16 @@ These are the rules that exist because of a specific way the thing could go quie
     rate-limits per chat, so a busy tick can run out of room mid-fan-out. Anything
     undelivered goes to a priority queue and is retried with backoff — critical medicines
     first, so a backlog of digests can't stand in front of a dose.
-11. **A daily digest and a liveness watchdog.** The digest is the cheapest way for a human
+11. **Nonsense in the database cannot stop the tick.** Every medicine and patient passes
+    through `core/sanitize.ts` before planning: intervals, gaps, course lengths and nag
+    ladders are clamped into workable ranges, unreadable times fall back to sane defaults,
+    and an unknown timezone becomes UTC. An exception in the planner would mean that
+    patient silently stops being reminded, with nothing to show for it but an audit row
+    nobody reads -- so garbage is made harmless rather than allowed to propagate.
+    `test/robustness.test.ts` throws several dozen malformed shapes at it and asserts it
+    neither throws, nor schedules a dose at an invalid instant, nor forgets to ask to be
+    woken again.
+12. **A daily digest and a liveness watchdog.** The digest is the cheapest way for a human
     to notice the whole thing has stopped; the watchdog escalates any medicine that's gone
     quiet for far longer than its own cycle. A course ending normally doesn't trip it —
     an alert that fires every time teaches people to ignore the one that matters.

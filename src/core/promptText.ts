@@ -58,8 +58,11 @@ Schedule types, pick what matches:
 - {"type":"times_per_day","n":3,"from":"08:00","to":"22:00"}
   Spreads across the patient's waking day, starting when they get up.
   Add "anchor":"clock" only if the times are genuinely fixed.
-- {"type":"meal","meals":["breakfast"],"relation":"before","offset":"30m"}
-  relation is before, after or with
+- {"type":"meal","meals":["breakfast","dinner"],"relation":"before",
+   "offset":"30m"}  relation is before, after or with.
+  The bot asks the patient when they are going to eat and times the
+  dose from their answer, so meal-relative is better than guessing
+  clock times whenever the prescription says "before/after food".
 - {"type":"as_needed"}  for PRN/SOS; add max_per_day and min_gap
 
 TAPERING (very common for eye drops): when a medicine steps down

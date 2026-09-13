@@ -76,14 +76,31 @@ describe('error reporting', () => {
 });
 
 describe('prescription shorthands', () => {
-  it('reads a 1+0+1 pattern as morning and night doses', () => {
+  it('reads a 1+0+1 pattern as doses tied to breakfast and dinner', () => {
+    // Genuinely tied to the meals, not flattened to clock times standing in for them --
+    // so the dose follows whenever the patient says they are actually eating.
     const r = parsePrescription({
       medicines: [{ id: 'x', name: 'Losartan', pattern: '1+0+1' }],
     }, { now: NOW });
     expect(r.ok).toBe(true);
     const m = r.value!.meds[0]!;
-    expect(m.kind).toBe('fixed_times');
-    expect(m.spec.times).toEqual(['08:00', '20:00']);
+    expect(m.kind).toBe('meal');
+    expect(m.spec.meals!.map((x) => x.meal)).toEqual(['breakfast', 'dinner']);
+    expect(m.spec.meals!.every((x) => x.relation === 'after')).toBe(true);
+  });
+
+  it('keeps before-meal and after-meal patterns genuinely different', () => {
+    const before = parsePrescription({
+      medicines: [{ id: 'x', name: 'PPI', pattern: '1+0+1', relation: 'before' }],
+    }, { now: NOW }).value!.meds[0]!;
+    const after = parsePrescription({
+      medicines: [{ id: 'y', name: 'NSAID', pattern: '1+0+1', relation: 'after' }],
+    }, { now: NOW }).value!.meds[0]!;
+    // A proton-pump inhibitor wants a real gap before food; an NSAID just wants food.
+    expect(before.spec.meals![0]!.relation).toBe('before');
+    expect(before.spec.meals![0]!.offsetMs).toBe(30 * MINUTE);
+    expect(after.spec.meals![0]!.relation).toBe('after');
+    expect(after.spec.meals![0]!.offsetMs).toBe(0);
   });
 
   it('reads a single-dose pattern as a meal-relative dose', () => {

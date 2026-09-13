@@ -28,6 +28,7 @@ export const COMMANDS = [
   { command: 'awake', description: "Start the day (accepts a time, e.g. /awake 6:30am)" },
   { command: 'sleep', description: 'End the day' },
   { command: 'ate', description: 'Record a meal, e.g. /ate lunch 1pm' },
+  { command: 'eating', description: "Say when you'll eat, e.g. /eating lunch in 1h" },
   { command: 'meds', description: 'List medicines and their schedules' },
   { command: 'skip', description: 'Skip the pending dose of a medicine' },
   { command: 'snooze', description: 'Push a reminder back, e.g. /snooze antibiotic drop 15m' },
@@ -105,6 +106,7 @@ export async function handleCommand(ctx: CmdCtx, msg: TgIncomingMessage): Promis
     case 'awake': case 'wokeup': case 'up': return cmdWake(ctx, 'wake', args);
     case 'sleep': case 'bed': case 'goodnight': return cmdWake(ctx, 'sleep', args);
     case 'ate': case 'eaten': return cmdAte(ctx, args);
+    case 'eating': case 'plan': return cmdEating(ctx, args);
     case 'took': case 'take': case 'taken': return cmdTook(ctx, args);
     case 'skip': return cmdSkip(ctx, args);
     case 'snooze': return cmdSnooze(ctx, args);
@@ -317,6 +319,67 @@ async function cmdWake(ctx: CmdCtx, kind: 'wake' | 'sleep', args: string): Promi
     kind === 'wake'
       ? `☀️ Good morning${suffix}. Starting today's schedule — I'll let you know when something is due.`
       : `🌙 Sleep well${suffix}. I'll keep quiet until morning.`,
+  );
+}
+
+/**
+ * "I'm eating in an hour." The forward-looking half of meal handling, and the only way a
+ * before-meal tablet can be timed at all.
+ */
+async function cmdEating(ctx: CmdCtx, args: string): Promise<void> {
+  const ap = await activePatient(ctx);
+  if (ap === null) return needsSetup(ctx);
+  const { patient, z } = ap;
+
+  const parts = args.trim().split(/\s+/).filter((x) => x !== '');
+  const meal = (parts[0] ?? '').toLowerCase();
+  if (meal === '') {
+    await reply(
+      ctx,
+      "When are you eating? e.g. <code>/eating lunch in 1h</code> or <code>/eating dinner at 8pm</code>\n\n" +
+        "<i>Knowing in advance is what lets me remind you about anything that goes before the meal.</i>",
+    );
+    return;
+  }
+
+  const rest = parts.slice(1).join(' ').replace(/^(in|at)\s+/i, '').trim();
+  let plannedAt: number | null = null;
+  if (rest === '') {
+    plannedAt = ctx.now + 30 * MINUTE;
+  } else {
+    const dur = parseDuration(rest);
+    if (dur !== null) plannedAt = ctx.now + dur;
+    else {
+      const t = parseTime(rest, ctx.now, z);
+      if (t !== null) {
+        // A clock time given now almost always means the next one, not the last.
+        plannedAt = t.at <= ctx.now ? t.at + 24 * HOUR : t.at;
+        if (plannedAt - ctx.now > 14 * HOUR) plannedAt = t.at;
+      }
+    }
+  }
+
+  if (plannedAt === null) {
+    await reply(ctx, `I couldn't read "${esc(rest)}". Try <code>in 45m</code> or <code>at 1pm</code>.`);
+    return;
+  }
+  if (plannedAt < ctx.now - MINUTE) {
+    await reply(ctx, `That's in the past — use <code>/ate ${esc(meal)} ${esc(rest)}</code> if you've already eaten.`);
+    return;
+  }
+
+  await ctx.db.recordMeal(patient.id, meal, z.localDay(ctx.now), plannedAt, 'planned', plannedAt);
+  await ctx.db.wakeNow(patient.id, ctx.now);
+  for (const q of await ctx.db.openPromptsFor(patient.id)) {
+    if (q.kind === 'meal' && q.body.meal === meal) {
+      await ctx.db.closePrompt(q.id, 'resolved', ctx.now);
+      await clearPromptMessages({ db: ctx.db, tg: ctx.tg, z, now: ctx.now }, q.id);
+    }
+  }
+  await reply(
+    ctx,
+    `🍽 <b>${esc(meal)}</b> at about ${z.fmtTime12(plannedAt)}.\n` +
+      `<i>I'll remind you about anything that needs taking before it.</i>`,
   );
 }
 
@@ -1255,7 +1318,8 @@ async function cmdHelp(ctx: CmdCtx): Promise<void> {
 
 <b>Every day</b>
 <code>/awake</code> · <code>/sleep</code> — start and end your day. I'll ask if you forget.
-<code>/ate lunch</code> — meal-timed medicines need this.
+<code>/eating lunch in 1h</code> — so I can time the before-meal tablets.
+<code>/ate lunch</code> — once you've actually eaten.
 <code>/status</code> — what's waiting and what's next.
 
 <b>Logging a dose</b>

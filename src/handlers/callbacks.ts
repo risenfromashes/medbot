@@ -132,6 +132,32 @@ export async function handleCallback(
   }
 
   // --- meals ---------------------------------------------------------------
+  if (cb.a === 'planMeal') {
+    const link = links.find((l) => l.role === 'patient') ?? links[0]!;
+    const patient = await db.getPatient(link.patientId);
+    if (patient === null) {
+      await ack();
+      return;
+    }
+    const z = zoneFor(patient.tz);
+    const plannedAt = now + cb.inMinutes * MINUTE;
+    await db.recordMeal(patient.id, cb.meal, z.localDay(now), plannedAt, 'planned', plannedAt);
+    await db.wakeNow(patient.id, now);
+    for (const prompt of await db.openPromptsFor(patient.id)) {
+      if (prompt.kind === 'meal' && prompt.body.meal === cb.meal) {
+        await db.closePrompt(prompt.id, 'resolved', now);
+        await clearPromptMessages({ db, tg, z, now }, prompt.id);
+      }
+    }
+    await ack(`Noted — ${cb.meal} around ${z.fmtTime12(plannedAt)}.`);
+    await tg.sendMessage(
+      chatId,
+      `🍽 <b>${esc(cb.meal)}</b> at about ${z.fmtTime12(plannedAt)}.\n` +
+        `<i>I'll remind you about anything that needs taking before it.</i>`,
+    );
+    return;
+  }
+
   if (cb.a === 'ate' || cb.a === 'skipMeal') {
     const link = links.find((l) => l.role === 'patient') ?? links[0]!;
     const patient = await db.getPatient(link.patientId);

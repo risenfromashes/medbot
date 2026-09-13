@@ -138,7 +138,25 @@ export function parseLocalDay(day: LocalDay): { y: number; mo: number; d: number
   return { y, mo, d };
 }
 
-/** 'HH:MM' -> {h, mi}. Accepts 'H:MM' too. */
+/**
+ * 'HH:MM' -> {h, mi}, or null. The forgiving form.
+ *
+ * Anything reaching the planner has already been through the importer, but "already
+ * validated" is an assumption, and a single malformed time in the database must not be
+ * able to kill the tick -- that patient would simply stop being reminded, with nothing to
+ * show for it but an audit row nobody reads.
+ */
+export function tryParseWall(hhmm: unknown): { h: number; mi: number } | null {
+  if (typeof hhmm !== 'string') return null;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
+  if (m === null) return null;
+  const h = +m[1]!;
+  const mi = +m[2]!;
+  if (!Number.isFinite(h) || !Number.isFinite(mi) || h > 23 || mi > 59) return null;
+  return { h, mi };
+}
+
+/** 'HH:MM' -> {h, mi}. Throws. Used by the importer, where a bad time is a real error. */
 export function parseWall(hhmm: string): { h: number; mi: number } {
   const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
   if (m === null) throw new Error(`bad wall time: ${hhmm}`);
@@ -154,16 +172,17 @@ export function parseWall(hhmm: string): { h: number; mi: number } {
  * timezone is involved in the normalisation of, say, Jan 32nd into Feb 1st.
  */
 export function addLocalDays(day: LocalDay, n: number): LocalDay {
-  const { y, mo, d } = parseLocalDay(day);
-  const t = Date.UTC(y, mo - 1, d + n);
+  const parsed = parseLocalDay0(day) ?? { y: 2000, mo: 1, d: 1 };
+  const { y, mo, d } = parsed;
+  const t = Date.UTC(y, mo - 1, d + (Number.isFinite(n) ? n : 0));
   const dt = new Date(t);
   return fmtDay(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
 }
 
 /** Whole days from `a` to `b` (b - a). Both are local days in the same zone. */
 export function diffLocalDays(a: LocalDay, b: LocalDay): number {
-  const pa = parseLocalDay(a);
-  const pb = parseLocalDay(b);
+  const pa = parseLocalDay0(a) ?? { y: 2000, mo: 1, d: 1 };
+  const pb = parseLocalDay0(b) ?? { y: 2000, mo: 1, d: 1 };
   return Math.round(
     (Date.UTC(pb.y, pb.mo - 1, pb.d) - Date.UTC(pa.y, pa.mo - 1, pa.d)) / DAY_MS,
   );
@@ -227,16 +246,31 @@ export function wallToUtc(
   return { utc: early, kind: 'gap', alt: late };
 }
 
-/** Convenience: 'YYYY-MM-DD' + 'HH:MM' in a zone -> instant. */
-export function wallOnDay(tz: string, day: LocalDay, hhmm: string): WallResult {
-  const { y, mo, d } = parseLocalDay(day);
-  const { h, mi } = parseWall(hhmm);
-  return wallToUtc(tz, y, mo, d, h, mi);
+/**
+ * Convenience: 'YYYY-MM-DD' + 'HH:MM' in a zone -> instant.
+ *
+ * Deliberately forgiving: a time it cannot read becomes midday rather than an exception,
+ * because the alternative is the whole schedule failing over one bad row.
+ */
+export function wallOnDay(tz: string, day: LocalDay, hhmm: string, fallback = '12:00'): WallResult {
+  let parsed = parseLocalDay0(day);
+  if (parsed === null) parsed = { y: 2000, mo: 1, d: 1 };
+  const wall = tryParseWall(hhmm) ?? tryParseWall(fallback) ?? { h: 12, mi: 0 };
+  return wallToUtc(tz, parsed.y, parsed.mo, parsed.d, wall.h, wall.mi);
+}
+
+function parseLocalDay0(day: LocalDay): { y: number; mo: number; d: number } | null {
+  if (typeof day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+  const y = +day.slice(0, 4);
+  const mo = +day.slice(5, 7);
+  const d = +day.slice(8, 10);
+  if (!Number.isFinite(y) || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  return { y, mo, d };
 }
 
 /** Shorthand when the caller only wants the instant. */
-export function wallOnDayUtc(tz: string, day: LocalDay, hhmm: string): number {
-  return wallOnDay(tz, day, hhmm).utc;
+export function wallOnDayUtc(tz: string, day: LocalDay, hhmm: string, fallback = '12:00'): number {
+  return wallOnDay(tz, day, hhmm, fallback).utc;
 }
 
 /**
@@ -244,7 +278,7 @@ export function wallOnDayUtc(tz: string, day: LocalDay, hhmm: string): number {
  * handful of zones midnight itself is skipped by a DST transition.
  */
 export function startOfLocalDay(tz: string, day: LocalDay): number {
-  const { y, mo, d } = parseLocalDay(day);
+  const { y, mo, d } = parseLocalDay0(day) ?? { y: 2000, mo: 1, d: 1 };
   return wallToUtc(tz, y, mo, d, 0, 0).utc;
 }
 
@@ -314,8 +348,8 @@ export interface Zone {
   startOfLocalDay(day: LocalDay): number;
   addLocalDays(day: LocalDay, n: number): LocalDay;
   diffLocalDays(a: LocalDay, b: LocalDay): number;
-  wallOnDay(day: LocalDay, hhmm: string): WallResult;
-  wallOnDayUtc(day: LocalDay, hhmm: string): number;
+  wallOnDay(day: LocalDay, hhmm: string, fallback?: string): WallResult;
+  wallOnDayUtc(day: LocalDay, hhmm: string, fallback?: string): number;
   lastWallAtOrBefore(hhmm: string, notAfter: number): number;
   nextWallAtOrAfter(hhmm: string, notBefore: number): number;
   fmtTime(utcMs: number): string;
@@ -325,7 +359,10 @@ export interface Zone {
 
 const ZONES = new Map<string, Zone>();
 
-export function zoneFor(tz: string): Zone {
+export function zoneFor(requested: string): Zone {
+  // An unknown zone -- a typo, a corrupted row, a zone this runtime's ICU lacks -- falls
+  // back to UTC rather than throwing on every single call downstream.
+  const tz = isValidTimeZone(requested) ? requested : 'UTC';
   let z = ZONES.get(tz);
   if (z === undefined) {
     z = {
@@ -334,8 +371,8 @@ export function zoneFor(tz: string): Zone {
       startOfLocalDay: (day) => startOfLocalDay(tz, day),
       addLocalDays,
       diffLocalDays,
-      wallOnDay: (day, hhmm) => wallOnDay(tz, day, hhmm),
-      wallOnDayUtc: (day, hhmm) => wallOnDayUtc(tz, day, hhmm),
+      wallOnDay: (day, hhmm, fallback) => wallOnDay(tz, day, hhmm, fallback),
+      wallOnDayUtc: (day, hhmm, fallback) => wallOnDayUtc(tz, day, hhmm, fallback),
       lastWallAtOrBefore: (hhmm, notAfter) => lastWallAtOrBefore(tz, hhmm, notAfter),
       nextWallAtOrAfter: (hhmm, notBefore) => nextWallAtOrAfter(tz, hhmm, notBefore),
       fmtTime: (u) => fmtTime(u, tz),

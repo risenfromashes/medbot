@@ -55,14 +55,19 @@ describe('parsing the real prescription', () => {
     expect(drop.courseDays).toBe(14);
   });
 
-  it('keeps "before meal" and "after meal" genuinely different', () => {
+  it('keeps "before meal" and "after meal" genuinely different, and tied to the meals', () => {
     const by = new Map(parsed.value!.meds.map((m) => [m.medKey, m]));
-    const before = by.get('stomach capsule')!.spec.times!;
-    const after = by.get('flexi')!.spec.times!;
+    const before = by.get('stomach capsule')!.spec.meals!;
+    const after = by.get('flexi')!.spec.meals!;
+
+    // Both follow breakfast and dinner rather than clock times standing in for them.
+    expect(before.map((r) => r.meal)).toEqual(['breakfast', 'dinner']);
+    expect(after.map((r) => r.meal)).toEqual(['breakfast', 'dinner']);
+
     // stomach capsule is a proton-pump inhibitor: half an hour before food actually matters.
-    expect(before).toEqual(['08:00', '20:00']);
-    expect(after).toEqual(['08:30', '20:30']);
-    expect(before).not.toEqual(after);
+    expect(before.every((r) => r.relation === 'before' && r.offsetMs === 30 * MINUTE)).toBe(true);
+    // Flexi just needs food; inventing a delay would be its own kind of wrong.
+    expect(after.every((r) => r.relation === 'after' && r.offsetMs === 0)).toBe(true);
   });
 });
 

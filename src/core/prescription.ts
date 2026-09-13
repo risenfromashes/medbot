@@ -497,24 +497,20 @@ function parseSchedule(
           intervalMs: null,
         };
       }
-      // Several meals a day: wall-clock slots at those meals' usual times, so the patient
-      // is not blocked waiting to confirm a meal for every dose. The before/after relation
-      // has to survive that translation -- "before meal" on a proton-pump inhibitor means
-      // half an hour before food, and silently dropping it schedules the dose at exactly
-      // the wrong moment.
+      // Several meals a day, still genuinely tied to the meals. Flattening these to clock
+      // times used to be necessary, because a meal was only known once it had happened
+      // and "half an hour before" would already have passed. Now that the bot asks when
+      // the patient is going to eat, the tablet can follow the answer.
       const rel = relation === 'before' ? 'before' : relation === 'with' ? 'with' : 'after';
-      // "before meal" on its own implies a real gap -- a proton-pump inhibitor wants
-      // half an hour before food. "after meal" just means with or just after it, so it
-      // takes no default delay; anything else would be inventing a time the prescription
-      // did not ask for.
       const offsetMs = c.dur(where, 'offset', mr['offset'], rel === 'before' ? 30 * MINUTE : 0) ?? 0;
-      const times = active.map((a) => {
-        const base = meals.find((m) => m.meal === a.meal)?.typicalLocal ?? defaultMealTime(a.meal);
-        const shift = rel === 'before' ? -offsetMs / MINUTE : rel === 'after' ? offsetMs / MINUTE : 0;
-        return addMinutesToWall(base, Math.round(shift));
-      });
-      times.sort();
-      return { kind: 'fixed_times', spec: { kind: 'fixed_times', times }, intervalMs: null };
+      return {
+        kind: 'meal',
+        spec: {
+          kind: 'meal',
+          meals: active.map((a) => ({ meal: a.meal, relation: rel, offsetMs })),
+        },
+        intervalMs: null,
+      };
     }
     c.err(where, `"pattern": "${mr['pattern']}" should look like "1+0+1"`);
     return null;
@@ -610,14 +606,13 @@ function parseSchedule(
         intervalMs: null,
       };
     }
-    // Several meals: wall-clock slots derived from each meal's usual time, shifted.
-    const times = single.map((meal) => {
-      const base = meals.find((m) => m.meal === meal)?.typicalLocal ?? defaultMealTime(meal);
-      const shift = relation === 'before' ? -offset / MINUTE : relation === 'after' ? offset / MINUTE : 0;
-      return addMinutesToWall(base, Math.round(shift));
-    });
-    times.sort();
-    return { kind: 'fixed_times', spec: { kind: 'fixed_times', times }, intervalMs: null };
+    // Several meals: one medicine anchored on each of them, so every dose follows the
+    // meal the patient actually reports.
+    return {
+      kind: 'meal',
+      spec: { kind: 'meal', meals: single.map((meal) => ({ meal, relation, offsetMs: offset })) },
+      intervalMs: null,
+    };
   }
 
   if (type === 'as_needed' || type === 'prn') {
@@ -660,10 +655,12 @@ export function describeSchedule(m: Pick<NormalizedMed, 'kind' | 'spec' | 'inter
     case 'fixed_times':
       return `at ${(m.spec.times ?? []).join(', ')}`;
     case 'meal': {
-      const r = m.spec.meal;
-      if (r === undefined) return 'with meals';
-      const off = r.offsetMs > 0 ? `${Math.round(r.offsetMs / MINUTE)} min ` : '';
-      return `${off}${r.relation} ${r.meal}`;
+      const refs = m.spec.meals ?? (m.spec.meal === undefined ? [] : [m.spec.meal]);
+      if (refs.length === 0) return 'with meals';
+      const first = refs[0]!;
+      const off = first.offsetMs > 0 ? `${Math.round(first.offsetMs / MINUTE)} min ` : '';
+      const which = refs.map((r) => r.meal).join(' and ');
+      return `${off}${first.relation} ${which}`;
     }
     case 'as_needed':
       return 'as needed';

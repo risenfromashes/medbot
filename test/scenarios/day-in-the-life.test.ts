@@ -184,16 +184,26 @@ describe('the questions it asks, beyond medicines', () => {
     expect(wakeAsks[0]!.at).toBeGreaterThanOrEqual(at(0, '06:30'));
   });
 
-  it('asks about meals once the window opens', () => {
-    const w = newDay();
-    w.now = at(0, '08:00');
-    w.declare('wake');
-    w.run(8 * HOUR); // through lunch
+  it('asks about meals relative to waking, not to the clock', () => {
+    const early = newDay();
+    early.now = at(0, '08:00');
+    early.declare('wake');
+    early.run(4 * HOUR);
+    const earlyAsk = early.sent.find((s) => s.kind === 'meal');
+    expect(earlyAsk, 'never asked about a meal').toBeDefined();
 
-    const mealAsks = w.sent.filter((s) => s.kind === 'meal');
-    expect(mealAsks.length, 'never asked about any meal').toBeGreaterThan(0);
-    // Breakfast is asked after 09:30, lunch after 14:30.
-    expect(mealAsks[0]!.at).toBeGreaterThanOrEqual(at(0, '09:30'));
+    const late = newDay();
+    late.now = at(0, '12:00');
+    late.declare('wake');
+    late.run(4 * HOUR);
+    const lateAsk = late.sent.find((s) => s.kind === 'meal');
+    expect(lateAsk).toBeDefined();
+
+    // Someone who got up at noon is not late for breakfast: the question follows the day
+    // they are actually having, four hours later than the early riser's.
+    expect(lateAsk!.at - earlyAsk!.at).toBeGreaterThanOrEqual(3 * HOUR);
+    expect(earlyAsk!.at - at(0, '08:00')).toBeLessThanOrEqual(90 * MINUTE);
+    expect(lateAsk!.at - at(0, '12:00')).toBeLessThanOrEqual(90 * MINUTE);
   });
 
   it('stops asking about a meal once she says she has eaten', () => {

@@ -164,12 +164,15 @@ export function medsFromPrescription(meds: NormalizedMed[]): Medicine[] {
 }
 
 export function mealDefsFromPrescription(meals: NormalizedPrescription['meals']): MealDef[] {
-  return meals.map((m) => ({
+  return meals.map((m, i) => ({
     patientId: 1,
     meal: m.meal,
     typicalLocal: m.typicalLocal,
     askAfterLocal: m.askAfterLocal,
     presumeAtLocal: m.presumeAtLocal,
+    afterWakeMs: null,
+    minGapAfterPrevMs: 3 * HOUR,
+    seq: i,
   }));
 }
 
@@ -301,7 +304,7 @@ export class World {
     const when = at ?? this.now;
     const day = this.z.localDay(when);
     this.state.mealEvents = this.state.mealEvents.filter((e) => !(e.meal === meal && e.localDay === day));
-    this.state.mealEvents.push({ patientId: 1, meal, localDay: day, at: when, source: 'confirmed' });
+    this.state.mealEvents.push({ patientId: 1, meal, localDay: day, at: when, source: 'confirmed', plannedAt: null, askedAt: null });
     this.state.patient.nextActionAt = this.now;
     for (const q of this.state.openPrompts) {
       if (q.kind === 'meal' && q.body.meal === meal) q.state = 'resolved';
@@ -515,7 +518,17 @@ export class World {
             localDay: a.localDay,
             at: a.at,
             source: a.source,
+            plannedAt: a.plannedAt ?? null,
+            askedAt: null,
           });
+          break;
+        }
+
+        case 'closeMealPrompt': {
+          for (const q of this.state.openPrompts) {
+            if (q.kind === 'meal' && q.body.meal === a.meal) q.state = 'resolved';
+          }
+          this.state.openPrompts = this.state.openPrompts.filter((q) => q.state === 'open');
           break;
         }
 
@@ -581,8 +594,28 @@ export class World {
     }
 
     // I1 -- liveness. Every active, self-scheduling medicine has a live dose.
+    //
+    // With one precise exception: a medicine to be taken AFTER a meal genuinely cannot be
+    // scheduled until that meal has happened. That is waiting on a precondition, not
+    // going silent, and the distinction matters -- weakening the invariant to "sometimes
+    // there is no dose" would hide the failure it exists to catch. The meal tests assert
+    // separately that such a medicine does get its dose once the meal is confirmed.
+    const today = this.z.localDay(this.now);
     for (const med of this.state.meds) {
       if (med.status !== 'active' || med.kind === 'as_needed') continue;
+
+      const refs = med.spec.meals ?? (med.spec.meal === undefined ? [] : [med.spec.meal]);
+      if (refs.length > 0) {
+        // A medicine tied only to meals the patient has said they are skipping has
+        // nothing to be scheduled against today. That is an answered question, not
+        // silence -- and it comes back tomorrow.
+        const anyMealToday = refs.some((ref) => {
+          const event = this.state.mealEvents.find((e) => e.meal === ref.meal && e.localDay === today);
+          return event === undefined || event.source !== 'skipped';
+        });
+        if (!anyMealToday) continue;
+      }
+
       expect(
         perMed.get(med.id) ?? 0,
         `${t}: active medicine ${med.medKey} has no live dose -- it has gone silent`,

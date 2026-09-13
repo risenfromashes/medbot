@@ -21,6 +21,8 @@ export interface DayFacts {
   localDay: LocalDay;
   /** Resolved or predicted instants for each meal, keyed by meal id. */
   meals: Map<string, { at: number; confirmed: boolean }>;
+  /** Meals the patient has said they are not having today. */
+  skipped?: Set<string>;
 }
 
 export interface DueResult {
@@ -139,20 +141,63 @@ function rawCycleStart(
     }
 
     case 'meal': {
-      const ref = med.spec.meal;
-      if (ref === undefined) return null;
-      const m = facts.meals.get(ref.meal);
-      if (m === undefined) return null;
+      const refs = med.spec.meals ?? (med.spec.meal === undefined ? [] : [med.spec.meal]);
+      if (refs.length === 0) return null;
 
-      if (ref.relation === 'before') {
-        // Fires against the *prediction*: by the time someone confirms they have eaten,
-        // the "30 minutes before" window is already gone.
-        return { at: m.at - ref.offsetMs, anchor: 'meal' };
+      // Anchor on whichever meal comes next after the last dose. With several meals a day
+      // this is what keeps the tablet following the meals actually reported, instead of a
+      // clock time that only ever stood in for them.
+      const cursor = Math.max(
+        med.lastCycleStartAt === null ? -Infinity : med.lastCycleStartAt + med.minGapMs,
+        now - med.catchupGraceMs,
+      );
+
+      let best: number | null = null;
+      let anyPending = false;
+
+      for (const ref of refs) {
+        const m = facts.meals.get(ref.meal);
+        if (m === undefined) continue;
+
+        // Every relation schedules against the meal time the bot currently believes in --
+        // stated if the patient has said, predicted otherwise. An after-meal dose waiting
+        // for a confirmation that may never come would leave the medicine with nothing
+        // scheduled at all, which is the silence this whole design is built to avoid. If
+        // the patient then says they are eating later, the dose follows: a meal-anchored
+        // dose is retimed whenever its meal moves.
+        if (ref.relation === 'after' && !m.confirmed) anyPending = true;
+
+        const at = ref.relation === 'before'
+          // Fires against the stated or predicted time, because by the time a meal is
+          // confirmed the before-window has already gone.
+          ? m.at - ref.offsetMs
+          : ref.relation === 'with'
+            ? m.at
+            : m.at + ref.offsetMs;
+
+        if (at > cursor && (best === null || at < best)) best = at;
       }
-      if (ref.relation === 'with') return { at: m.at, anchor: 'meal' };
-      // 'after' genuinely needs the meal to have happened.
-      if (!m.confirmed) return null;
-      return { at: m.at + ref.offsetMs, anchor: 'meal' };
+
+      if (best !== null) return { at: best, anchor: 'meal' };
+      void anyPending;
+
+      // Every meal today is already behind us. A tablet taken with breakfast and dinner
+      // still has a dose tomorrow, and leaving it with nothing scheduled would be exactly
+      // the silence this system exists to avoid. Tomorrow's meals are not yet known, so
+      // approximate them a day on from today's; the moment the patient says when they are
+      // eating, the dose follows that instead.
+      {
+        let earliest: number | null = null;
+        for (const ref of refs) {
+          const m = facts.meals.get(ref.meal);
+          if (m === undefined) continue;
+          const shift = ref.relation === 'before' ? -ref.offsetMs : ref.relation === 'after' ? ref.offsetMs : 0;
+          const at = m.at + DAY_MS + shift;
+          if (earliest === null || at < earliest) earliest = at;
+        }
+        if (earliest !== null) return { at: earliest, anchor: 'meal' };
+      }
+      return null;
     }
 
     case 'as_needed':

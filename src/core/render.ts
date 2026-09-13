@@ -80,6 +80,15 @@ export function renderDosePrompt(
     }
   }
 
+  // The reason is the point: "take this now, you're eating in half an hour" is an
+  // instruction someone will actually follow.
+  const bm = prompt.body.beforeMeal;
+  if (bm !== undefined) {
+    lines.push(
+      `\n⏱ <i>You said ${esc(bm.meal)} in about ${fmtDuration(bm.inMs)} — this one goes before it.</i>`,
+    );
+  }
+
   lines.push(overdueLine(prompt.nudgeCount, overdue, z, dueAt));
 
   const buttons: InlineButton[][] = [];
@@ -147,15 +156,48 @@ export function renderSleepPrompt(forCaregiver: boolean, patientName: string): R
   };
 }
 
-export function renderMealPrompt(meal: string, forCaregiver: boolean, patientName: string): Rendered {
+/**
+ * Asking about a meal, in two stages.
+ *
+ * The first is forward-looking -- "when are you eating?" -- because that is the only way
+ * a "half an hour before food" tablet can ever be scheduled. By the time someone confirms
+ * they have eaten, that window has gone.
+ */
+export function renderMealPrompt(
+  meal: string,
+  forCaregiver: boolean,
+  patientName: string,
+  stage: 'plan' | 'confirm' = 'plan',
+): Rendered {
   const nice = meal.charAt(0).toUpperCase() + meal.slice(1);
+
+  if (stage === 'confirm') {
+    return {
+      text: forCaregiver
+        ? `🍽 ${esc(patientName)} said they'd have ${esc(meal)} around now.`
+        : `🍽 Having ${esc(meal)} now?`,
+      buttons: [
+        [
+          { text: `✅ Eating now`, callback_data: encodeCallback({ a: 'ate', meal }) },
+          { text: '🕐 Another 30 min', callback_data: encodeCallback({ a: 'planMeal', meal, inMinutes: 30 }) },
+        ],
+        [{ text: '⏭ Skipping it', callback_data: encodeCallback({ a: 'skipMeal', meal }) }],
+      ],
+    };
+  }
+
   return {
     text: forCaregiver
-      ? `🍽 ${esc(patientName)} hasn't confirmed ${esc(meal)} yet.`
-      : `🍽 Have you had ${esc(meal)}?`,
+      ? `🍽 ${esc(patientName)} hasn't said when they're having ${esc(meal)}.`
+      : `🍽 When are you having ${esc(nice.toLowerCase())}?\n<i>So I can time the tablets that go before or after it.</i>`,
     buttons: [
       [
-        { text: `✅ Had ${nice.toLowerCase()}`, callback_data: encodeCallback({ a: 'ate', meal }) },
+        { text: 'In ~30 min', callback_data: encodeCallback({ a: 'planMeal', meal, inMinutes: 30 }) },
+        { text: 'In ~1 hour', callback_data: encodeCallback({ a: 'planMeal', meal, inMinutes: 60 }) },
+        { text: 'In ~2 hours', callback_data: encodeCallback({ a: 'planMeal', meal, inMinutes: 120 }) },
+      ],
+      [
+        { text: '🍽 Eating now', callback_data: encodeCallback({ a: 'ate', meal }) },
         { text: '⏭ Skipping it', callback_data: encodeCallback({ a: 'skipMeal', meal }) },
       ],
     ],
