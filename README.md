@@ -10,7 +10,7 @@ sleep. By day three you've lost track of whether you took the four o'clock one.
 
 So medbot works the way the prescription actually reads. It waits until you're up before
 starting the day. It knows the drops need ten minutes between them, and it counts those ten
-minutes from when you actually took the last one. It knows the stomach_capsule goes half an hour
+minutes from when you actually took the last one. It knows the capsule goes half an hour
 before breakfast. And it keeps asking — politely at first, then less so — until you tell it
 you've taken the thing.
 
@@ -105,26 +105,27 @@ Apply. Read it against the paper before you do — it's reading handwriting, and
 Most of the time you just tap the buttons on the reminder. When you'd rather type:
 
 ```
-/status                 what's waiting, what's coming
-/awake      /sleep      start and end your day
-/took drop_a              took it just now
-/took drop_a 5pm          took it earlier — it'll fix the schedule
-/skip drop_a              not taking this one
-/snooze drop_a 15m        ask me again shortly
-/ate lunch              for the ones tied to meals
-/meds                   what you're on and how far through
-/log                    how you've been doing
+/status                what's waiting, what's coming
+/awake    /sleep       start and end your day
+/took drops            took it just now
+/took drops 5pm        took it earlier — it'll fix the schedule
+/skip drops            not taking this one
+/snooze drops 15m      ask me again shortly
+/eating lunch in 1h    so it can time the before-meal tablets
+/ate lunch             once you've actually eaten
+/meds                  what you're on, and buttons to change it
+/log                   how you've been doing
 ```
 
 Two things worth knowing:
 
-**If you took it and forgot to tap, just say so.** `/took drop_a 5pm` works even if the bot
+**If you took it and forgot to tap, just say so.** `/took drops 5pm` works even if the bot
 already gave up and logged that dose as missed. It'll correct the record and recalculate
 everything from the real time.
 
-**Changing things doesn't mean touching code.** `/edit drop_a every 3h`, `/extend drop_a 3d`,
-`/pause`, `/stop`, `/add`, or `/import` a whole new prescription — and `/meds` gives you
-buttons for most of it. All from your phone.
+**Changing things doesn't mean touching code.** `/edit drops perday 3` when the doctor cuts
+you to three times a day, `/extend drops 3d`, `/pause`, `/stop`, `/add`, or `/import` a
+whole new prescription. `/meds` gives you a button beside each medicine for most of it.
 
 ---
 
