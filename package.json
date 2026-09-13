@@ -6,7 +6,7 @@
   "description": "A deterministic Telegram bot that nags you to take your medicines.",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "node scripts/medbot.mjs deploy",
+    "deploy": "wrangler d1 migrations apply MEDBOT_DB --remote && wrangler deploy",
     "migrate:local": "wrangler d1 migrations apply MEDBOT_DB --local",
     "migrate:remote": "wrangler d1 migrations apply MEDBOT_DB --remote",
     "test": "vitest run",
@@ -17,7 +17,7 @@
     "status": "node scripts/medbot.mjs status",
     "reset-password": "node scripts/medbot.mjs reset-password",
     "calibrate": "node scripts/medbot.mjs calibrate",
-    "postinstall": "node -e \"console.log('\\\\n  medbot installed. Run: npm run setup\\\\n')\""
+    "redeploy": "node scripts/medbot.mjs deploy"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260911.1",

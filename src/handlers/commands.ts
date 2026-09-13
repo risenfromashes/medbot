@@ -10,7 +10,7 @@ import type { Medicine, Patient } from '../core/domain.js';
 import { describeCourse, describeSchedule, hashString, parsePrescription } from '../core/prescription.js';
 import { PRESCRIPTION_PROMPT_PARTS } from '../core/promptText.js';
 import type { NormalizedPrescription } from '../core/prescription.js';
-import { renderConfirmation } from '../core/render.js';
+import { renderConfirmation, renderEditMenu } from '../core/render.js';
 import { resolveRetro } from '../core/retro.js';
 import { parseDuration, parseTime, splitTrailingTime } from '../core/timeparse.js';
 import { HOUR, MINUTE, fmtDuration, isValidTimeZone, parseWall, zoneFor } from '../core/tz.js';
@@ -43,6 +43,8 @@ export const COMMANDS = [
   { command: 'stop', description: 'Stop a medicine for good' },
   { command: 'tz', description: 'Set the timezone, e.g. /tz Asia/Dhaka' },
   { command: 'invite', description: 'Get a code so someone can back you up' },
+  { command: 'patients', description: 'Who this chat is linked to' },
+  { command: 'settings', description: 'Your day, timezone and reminder settings' },
   { command: 'caregiver', description: 'Link this chat as a backup for someone' },
   { command: 'help', description: 'How all of this works' },
 ];
@@ -120,6 +122,8 @@ export async function handleCommand(ctx: CmdCtx, msg: TgIncomingMessage): Promis
     case 'resume': return cmdMedStatus(ctx, args, 'active');
     case 'stop': return cmdMedStatus(ctx, args, 'discontinued');
     case 'tz': case 'timezone': return cmdTz(ctx, args);
+    case 'patients': return cmdPatients(ctx);
+    case 'settings': return cmdSettings(ctx, args);
     case 'invite': return cmdInvite(ctx);
     case 'caregiver': case 'watch': return cmdCaregiver(ctx, args);
     case 'health': return cmdHealth(ctx);
@@ -618,7 +622,11 @@ async function cmdMeds(ctx: CmdCtx): Promise<void> {
           : '';
     return `${icon} <b>${esc(m.name)}</b> <code>${esc(m.medKey)}</code>\n   ${esc(describeSchedule(m))}, ${esc(describeCourse(m))}${progress}${steps}`;
   });
-  await reply(ctx, lines.join('\n\n'));
+  const buttons = meds
+    .filter((m) => m.status === 'active' || m.status === 'paused')
+    .slice(0, 8)
+    .map((m) => [{ text: `✏️ ${m.name.slice(0, 30)}`, callback_data: encodeCallback({ a: 'editMenu', medId: m.id }) }]);
+  await reply(ctx, lines.join('\n\n'), buttons.length > 0 ? buttons : undefined);
 }
 
 async function cmdLog(ctx: CmdCtx, args: string): Promise<void> {
@@ -1137,6 +1145,101 @@ async function cmdAdd(ctx: CmdCtx, args: string): Promise<void> {
     ? `\n\n<b>Worth checking</b>\n${result.warnings.map((w) => `• ${esc(w)}`).join('\n')}`
     : '';
   await reply(ctx, `➕ <b>Added</b>\n${added}${warnings}`);
+}
+
+/** Who this chat can see and answer for. */
+async function cmdPatients(ctx: CmdCtx): Promise<void> {
+  const links = await ctx.db.linksForChat(ctx.chatId);
+  if (links.length === 0) return needsSetup(ctx);
+
+  const lines: string[] = ['<b>This chat is linked to</b>'];
+  for (const l of links) {
+    const p = await ctx.db.getPatient(l.patientId);
+    if (p === null) continue;
+    const z = zoneFor(p.tz);
+    const meds = await ctx.db.medsFor(l.patientId);
+    lines.push(
+      `\n• <b>${esc(p.displayName)}</b> — ${l.role === 'patient' ? 'you' : 'you are their backup'}\n` +
+        `  ${p.wakeState === 'awake' ? '☀️ awake' : '🌙 asleep'} · ${z.fmtTime12(ctx.now)} ${esc(p.tz)}\n` +
+        `  ${meds.length} active medicine${meds.length === 1 ? '' : 's'}` +
+        (l.escalationTier > 0 ? ` · told after ${fmtDuration(l.escalateAfterMs)} of silence` : ''),
+    );
+  }
+  lines.push('\n<i>Use /invite to let someone back you up.</i>');
+  await reply(ctx, lines.join('\n'));
+}
+
+/**
+ * The times that shape the day. These are the knobs worth changing without a re-import --
+ * everything else lives in the prescription.
+ */
+async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
+  const ap = await activePatient(ctx);
+  if (ap === null) return needsSetup(ctx);
+  const { patient, z } = ap;
+
+  const parts = args.trim().split(/\s+/).filter((x) => x !== '');
+  const FIELDS: Record<string, { column: string; label: string }> = {
+    morning: { column: 'morning_poll_at', label: 'start asking if you are awake' },
+    wake: { column: 'presumed_wake_at', label: 'assume you are awake by' },
+    evening: { column: 'evening_poll_at', label: 'start asking if you are in bed' },
+    sleep: { column: 'presumed_sleep_at', label: 'assume you are asleep by' },
+    digest: { column: 'digest_at', label: 'send the daily summary' },
+  };
+
+  if (parts.length >= 2) {
+    const key = parts[0]!.toLowerCase();
+    const entry = FIELDS[key];
+    if (entry === undefined) {
+      await reply(ctx, `I don't know the setting "${esc(key)}". Send /settings to see them.`);
+      return;
+    }
+    let wall: string;
+    try {
+      const { h, mi } = parseWall(parts[1]!);
+      wall = `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}`;
+    } catch {
+      await reply(ctx, `"${esc(parts[1] ?? '')}" is not a time like <code>07:30</code>.`);
+      return;
+    }
+    await ctx.env.MEDBOT_DB
+      .prepare(`UPDATE patients SET ${entry.column} = ?2, next_action_at = ?3 WHERE id = ?1`)
+      .bind(patient.id, wall, ctx.now)
+      .run();
+    await ctx.db.audit(patient.id, 'setting_changed', String(ctx.chatId), { key, value: wall }, ctx.now);
+    await reply(ctx, `⚙️ I'll ${esc(entry.label)} at <b>${esc(wall)}</b> from now on.`);
+    return;
+  }
+
+  await reply(
+    ctx,
+    `<b>⚙️ Settings</b> · ${esc(patient.displayName)}\n\n` +
+      `Timezone       <code>${esc(patient.tz)}</code> — it's ${z.fmtTime12(ctx.now)} there\n` +
+      `Morning ask    <code>${esc(patient.morningPollAt)}</code>\n` +
+      `Assume awake   <code>${esc(patient.presumedWakeAt)}</code>\n` +
+      `Evening ask    <code>${esc(patient.eveningPollAt)}</code>\n` +
+      `Assume asleep  <code>${esc(patient.presumedSleepAt)}</code>\n` +
+      `Daily summary  <code>${esc(patient.digestAt)}</code>\n\n` +
+      `<b>To change one</b>\n` +
+      `<code>/settings morning 06:30</code>\n` +
+      `<code>/settings wake 09:00</code>\n` +
+      `<code>/settings evening 22:30</code>\n` +
+      `<code>/settings sleep 01:00</code>\n` +
+      `<code>/settings digest 21:30</code>\n` +
+      `<code>/tz Asia/Dhaka</code>\n\n` +
+      `<i>"Assume awake" is the safety net: past that time I start reminding you even if ` +
+      `you haven't said you're up, because going quiet is worse than being wrong.</i>`,
+  );
+}
+
+/** Shared by the /meds buttons and the callback handler. */
+export async function editMenuFor(ctx: CmdCtx, medId: number): Promise<{ text: string; buttons: Array<Array<{ text: string; callback_data: string }>> } | null> {
+  const med = await ctx.db.getMed(medId);
+  if (med === null) return null;
+  const patient = await ctx.db.getPatient(med.patientId);
+  if (patient === null) return null;
+  const r = renderEditMenu(med, zoneFor(patient.tz));
+  return { text: r.text, buttons: r.buttons };
 }
 
 // --- help ----------------------------------------------------------------

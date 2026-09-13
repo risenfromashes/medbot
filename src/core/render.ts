@@ -11,7 +11,7 @@ import type { InlineButton } from '../io/telegram.js';
 import { encodeCallback } from './callbackCodec.js';
 import { esc } from '../io/telegram.js';
 import type { Zone } from './tz.js';
-import { MINUTE, fmtDuration, fmtTime12 } from './tz.js';
+import { HOUR, MINUTE, fmtDuration, fmtTime12 } from './tz.js';
 
 export interface Rendered {
   text: string;
@@ -180,4 +180,52 @@ export function renderConfirmation(
 /** A collapsed one-liner replacing a superseded nudge, so the chat stays readable. */
 export function renderCollapsed(medLabel: string, z: Zone, dueAt: number): string {
   return `<i>💊 ${esc(medLabel)} — reminder from ${z.fmtTime12(dueAt)}</i>`;
+}
+
+/**
+ * The tap-through editor.
+ *
+ * `/edit antibiotic drop every 3h` is precise but assumes you remember the syntax. For the handful of
+ * changes people actually make mid-course, offering the plausible values as buttons means
+ * nobody has to memorise anything -- which is the whole point of keeping the prescription
+ * out of the source code.
+ */
+export function renderEditMenu(med: Medicine, z: Zone): Rendered {
+  const rows: InlineButton[][] = [];
+  const set = (field: string, value: string, label: string): InlineButton => ({
+    text: label,
+    callback_data: encodeCallback({ a: 'editSet', medId: med.id, field, value }),
+  });
+
+  const lines = [
+    `✏️ <b>${esc(med.name)}</b>`,
+    med.doseText === null ? '' : esc(med.doseText),
+  ];
+
+  if (med.kind === 'interval') {
+    const hours = (med.intervalMs ?? 0) / HOUR;
+    lines.push('', `Currently every ${hours % 1 === 0 ? hours : (med.intervalMs ?? 0) / MINUTE + 'm'}${hours % 1 === 0 ? 'h' : ''}.`);
+    // Offer the neighbouring intervals people actually move between.
+    const choices = [2, 3, 4, 6, 8, 12].filter((h) => h !== hours);
+    rows.push(choices.slice(0, 3).map((h) => set('every', `${h}h`, `every ${h}h`)));
+    rows.push(choices.slice(3).map((h) => set('every', `${h}h`, `every ${h}h`)));
+  } else if (med.kind === 'fixed_times') {
+    lines.push('', `Currently at ${(med.spec.times ?? []).join(', ')}.`);
+  }
+
+  if (med.steps.length > 1) {
+    const cur = Math.round(med.stepSpacingMs / MINUTE);
+    lines.push(`${med.steps.length} drops, ${cur} minutes apart.`);
+    rows.push([5, 10, 15, 20].filter((m) => m !== cur).map((m) => set('spacing', `${m}m`, `${m}m apart`)));
+  }
+
+  rows.push([
+    { text: '⏸ Pause', callback_data: encodeCallback({ a: 'editSet', medId: med.id, field: 'status', value: 'paused' }) },
+    { text: '⏹ Stop', callback_data: encodeCallback({ a: 'editSet', medId: med.id, field: 'status', value: 'stopped' }) },
+    { text: '⏳ +3 days', callback_data: encodeCallback({ a: 'editSet', medId: med.id, field: 'extend', value: '3d' }) },
+  ]);
+
+  lines.push('', '<i>For anything else: <code>/edit ' + esc(med.medKey) + ' dose 2 drops</code></i>');
+  void z;
+  return { text: lines.filter((l) => l !== '').join('\n'), buttons: rows };
 }

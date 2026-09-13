@@ -15,6 +15,7 @@ import type {
 } from '../src/core/domain.js';
 import { isLive } from '../src/core/domain.js';
 import { HOUR, MINUTE, zoneFor } from '../src/core/tz.js';
+import { rollForwardAfter } from '../src/core/planSchedule.js';
 import type { Zone } from '../src/core/tz.js';
 
 export const TZ = 'Asia/Dhaka';
@@ -567,6 +568,24 @@ export class World {
       ).toBe(`${med.nextSeq}.${med.nextStep}`);
     }
 
+    // I4 -- no hang. A prompted dose must never outlive the point at which its own
+    // successor would be due; if it does, that medicine is wedged.
+    for (const d of this.state.liveDoses) {
+      if (d.status !== 'prompted' && d.status !== 'due') continue;
+      const med = this.state.meds.find((m) => m.id === d.medId);
+      if (med === undefined) continue;
+      // Measured against the medicine's OWN roll-forward horizon, which is what the
+      // planner uses. Guessing a limit here just asserts a different rule than the one
+      // the code implements -- a once-daily medicine legitimately stays pending for hours,
+      // because its successor is not due yet and the bot is still asking.
+      const limit = rollForwardAfter(med) * 1.5;
+      const asleepAllowance = this.state.patient.wakeState === 'asleep' ? 14 * HOUR : 0;
+      expect(
+        this.now - d.effectiveDueAt <= limit + asleepAllowance,
+        `${t}: ${med.medKey} has been pending ${Math.round((this.now - d.effectiveDueAt) / 60000)}min — wedged`,
+      ).toBe(true);
+    }
+
     // I5 -- quiet. No non-critical dose message while the patient is asleep.
     if (this.state.patient.wakeState === 'asleep') {
       const justSent = this.sent.filter((s) => s.at === this.now && s.kind === 'dose');
@@ -589,6 +608,22 @@ export class World {
       .filter((d) => d.medId === med.id && d.status === 'taken' && d.takenAt !== null)
       .sort((a, b) => a.takenAt! - b.takenAt!)
       .map((d) => `${this.z.localDay(d.takenAt!)} ${this.z.fmtTime(d.takenAt!)}`);
+  }
+
+  /**
+   * I6 -- dosing rate. Over a long run, a medicine should resolve roughly as many doses as
+   * its schedule implies. This is the invariant that catches the whole "quietly stopped
+   * working" class: everything else can pass while the bot simply does less and less.
+   */
+  assertDosingRate(medKey: string, expected: number, tolerance = 0.9): void {
+    const med = this.med(medKey);
+    const resolved = this.allDoses.filter(
+      (d) => d.medId === med.id && (d.status === 'taken' || d.status === 'missed' || d.status === 'skipped'),
+    ).length;
+    expect(
+      resolved >= expected * tolerance,
+      `${medKey}: only ${resolved} doses resolved, expected at least ${Math.floor(expected * tolerance)} of ${expected}`,
+    ).toBe(true);
   }
 
   countByStatus(medKey: string, status: DoseStatus): number {

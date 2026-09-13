@@ -275,6 +275,26 @@ npm run deploy           # migrate and push code
 `GET /health` reports when the scheduler last ran and how many messages are queued. It's
 the quickest way to check the thing is alive.
 
+### Commands
+
+The full surface, all of which avoids ever editing code:
+
+```
+/start /help /status /meds /log /patients /settings
+/awake [time]  /sleep [time]  /ate breakfast|lunch|dinner [time]
+/took <med> [time]  /snooze <med> [15m]  /skip <med>  /undo
+/prompt  /import  /export  /prescription
+/add {...}  /edit <med> every 3h  /pause  /resume  /stop  /extend <med> 3d
+/tz Asia/Dhaka  /invite  /caregiver <code>
+```
+
+Every `[time]` is optional and takes the retrospective formats above. `/meds` also puts an
+✏️ button beside each medicine that opens a tap-through editor — interval, spacing, pause,
+stop, extend — so the common mid-course changes need no remembered syntax.
+
+`/settings` covers the times that shape the day: when to start asking whether you are
+awake, when to give up and assume it, the same for bedtime, and when to send the digest.
+
 ### The prescription format
 
 Five schedule types cover essentially every real prescription: `interval` (anchored on the

@@ -18,6 +18,10 @@ export type Callback =
   | { a: 'ate'; meal: string }
   | { a: 'skipMeal'; meal: string }
   | { a: 'confirmImport'; versionId: number }
+  /** Open the tap-through edit menu for a medicine. */
+  | { a: 'editMenu'; medId: number }
+  /** One of the suggested values inside that menu. */
+  | { a: 'editSet'; medId: number; field: string; value: string }
   | { a: 'cancelImport'; versionId: number }
   | { a: 'noop' };
 
@@ -35,6 +39,9 @@ export function encodeCallback(cb: Callback): string {
     case 'sleep': return 'b';
     case 'ate': return `m.${cb.meal}`;
     case 'skipMeal': return `x.${cb.meal}`;
+    case 'editMenu': return `E.${b36(cb.medId)}`;
+    // field and value are short tokens, well inside the 64-byte callback_data cap.
+    case 'editSet': return `S.${b36(cb.medId)}.${cb.field}.${cb.value}`;
     case 'confirmImport': return `i.${b36(cb.versionId)}`;
     case 'cancelImport': return `c.${b36(cb.versionId)}`;
     case 'noop': return '-';
@@ -57,6 +64,11 @@ export function decodeCallback(data: string): Callback {
     case 'b': return { a: 'sleep' };
     case 'm': return parts[1] !== undefined ? { a: 'ate', meal: parts[1] } : { a: 'noop' };
     case 'x': return parts[1] !== undefined ? { a: 'skipMeal', meal: parts[1] } : { a: 'noop' };
+    case 'E': return valid(n(1)) ? { a: 'editMenu', medId: n(1) } : { a: 'noop' };
+    case 'S':
+      return valid(n(1)) && parts[2] !== undefined && parts[3] !== undefined
+        ? { a: 'editSet', medId: n(1), field: parts[2], value: parts[3] }
+        : { a: 'noop' };
     case 'i': return valid(n(1)) ? { a: 'confirmImport', versionId: n(1) } : { a: 'noop' };
     case 'c': return valid(n(1)) ? { a: 'cancelImport', versionId: n(1) } : { a: 'noop' };
     default: return { a: 'noop' };

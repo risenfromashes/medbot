@@ -10,11 +10,12 @@
 
 import { decodeCallback } from '../core/callbackCodec.js';
 import { renderConfirmation, renderEarlierMenu } from '../core/render.js';
-import { MINUTE, fmtDuration, zoneFor } from '../core/tz.js';
+import { HOUR, MINUTE, fmtDuration, zoneFor } from '../core/tz.js';
+import { parseDuration } from '../core/timeparse.js';
 import { Db } from '../io/db.js';
 import { Telegram, esc } from '../io/telegram.js';
 import { broadcast, clearPromptMessages } from './dispatch.js';
-import { applyImport } from './commands.js';
+import { applyImport, editMenuFor } from './commands.js';
 import type { CmdCtx } from './commands.js';
 import type { Env, TgCallbackQuery } from '../types.js';
 
@@ -59,6 +60,48 @@ export async function handleCallback(
     const summary = await applyImport(ctx, cb.versionId);
     if (q.message !== undefined) await tg.editMessageText(chatId, q.message.message_id, summary);
     else await tg.sendMessage(chatId, summary);
+    return;
+  }
+
+  // --- the tap-through editor ----------------------------------------------
+  if (cb.a === 'editMenu' || cb.a === 'editSet') {
+    const med = await db.getMed(cb.medId);
+    if (med === null) {
+      await ack('That medicine is gone.');
+      return;
+    }
+    // A caregiver for one patient must not be able to edit another's medicine.
+    const link = links.find((l) => l.patientId === med.patientId && l.canAck);
+    if (link === undefined) {
+      await ack('You cannot change this one.', true);
+      return;
+    }
+
+    if (cb.a === 'editSet') {
+      const applied = await applyEdit(db, med.id, cb.field, cb.value, chatId, now);
+      if (applied === null) {
+        await ack('That change did not work.');
+        return;
+      }
+      await db.wakeNow(med.patientId, now);
+      await ack(`✓ ${applied}`);
+      if (q.message !== undefined) {
+        const refreshed = await editMenuFor(ctx, med.id);
+        const note = `\n\n✅ <i>${esc(applied)}</i>`;
+        if (refreshed !== null) {
+          await tg.editMessageText(chatId, q.message.message_id, refreshed.text + note, {
+            replyMarkup: { inline_keyboard: refreshed.buttons },
+          });
+        }
+      }
+      return;
+    }
+
+    const menu = await editMenuFor(ctx, med.id);
+    await ack();
+    if (menu !== null) {
+      await tg.sendMessage(chatId, menu.text, { replyMarkup: { inline_keyboard: menu.buttons } });
+    }
     return;
   }
 
@@ -230,5 +273,58 @@ export async function handleCallback(
         renderConfirmation(labels.join(', '), now, z, chats.length > 1 ? userName : null, false),
       );
     }
+  }
+}
+
+/** Apply one tapped change. Returns a human description, or null if it was rejected. */
+async function applyEdit(
+  db: Db,
+  medId: number,
+  field: string,
+  value: string,
+  chatId: number,
+  now: number,
+): Promise<string | null> {
+  const med = await db.getMed(medId);
+  if (med === null) return null;
+
+  switch (field) {
+    case 'every': {
+      const ms = parseDuration(value);
+      if (ms === null || ms < 5 * MINUTE) return null;
+      await db.updateMed(
+        medId,
+        { intervalMs: ms, minGapMs: Math.min(med.minGapMs, Math.floor(ms * 0.75)), spec: { ...med.spec, kind: 'interval', intervalMs: ms } },
+        { rescheduleNow: true },
+        now,
+      );
+      await db.audit(med.patientId, 'med_edited', String(chatId), { medId, field, value }, now);
+      return `now every ${fmtDuration(ms)}`;
+    }
+    case 'spacing': {
+      const ms = parseDuration(value);
+      if (ms === null || med.steps.length < 2) return null;
+      await db.updateMed(medId, { stepSpacingMs: ms }, { rescheduleNow: true }, now);
+      await db.audit(med.patientId, 'med_edited', String(chatId), { medId, field, value }, now);
+      return `now ${fmtDuration(ms)} apart`;
+    }
+    case 'status': {
+      const next = value === 'paused' ? 'paused' : 'discontinued';
+      await db.setMedStatus(medId, next, now);
+      await db.audit(med.patientId, 'med_edited', String(chatId), { medId, field, value }, now);
+      return next === 'paused' ? 'paused' : 'stopped';
+    }
+    case 'extend': {
+      const ms = parseDuration(value);
+      if (ms === null) return null;
+      const days = Math.max(1, Math.round(ms / (24 * HOUR)));
+      const total = (med.courseDays ?? 0) + days;
+      await db.updateMed(medId, { courseKind: 'days', courseDays: total }, { rescheduleNow: false }, now);
+      if (med.status === 'completed') await db.setMedStatus(medId, 'active', now);
+      await db.audit(med.patientId, 'course_extended', String(chatId), { medId, extraDays: days }, now);
+      return `course extended to ${total} days`;
+    }
+    default:
+      return null;
   }
 }
