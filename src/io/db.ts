@@ -106,16 +106,49 @@ export class Db {
     tier: number,
     escalateAfterMs: number,
     now: number,
+    displayName: string | null = null,
   ): Promise<void> {
     await this.d1
       .prepare(
-        `INSERT INTO chats (chat_id, patient_id, role, can_ack, escalation_tier, escalate_after_ms, active, linked_at)
-         VALUES (?1, ?2, ?3, 1, ?4, ?5, 1, ?6)
+        `INSERT INTO chats (chat_id, patient_id, role, can_ack, escalation_tier, escalate_after_ms, active, linked_at, display_name)
+         VALUES (?1, ?2, ?3, 1, ?4, ?5, 1, ?6, ?7)
          ON CONFLICT (chat_id, patient_id) DO UPDATE SET
-           role = ?3, escalation_tier = ?4, escalate_after_ms = ?5, active = 1, blocked_at = NULL`,
+           -- Never demote the patient's own chat. Redeeming a caregiver code for yourself
+           -- would otherwise turn your own chat into a backup for you, and you would stop
+           -- getting reminders first-hand -- silently, since a caregiver link looks
+           -- perfectly healthy from the outside.
+           role = CASE WHEN chats.role = 'patient' THEN 'patient' ELSE ?3 END,
+           escalation_tier = CASE WHEN chats.role = 'patient' THEN 0 ELSE ?4 END,
+           escalate_after_ms = ?5, active = 1, blocked_at = NULL,
+           display_name = COALESCE(?7, display_name)`,
       )
-      .bind(chatId, patientId, role, tier, escalateAfterMs, now)
+      .bind(chatId, patientId, role, tier, escalateAfterMs, now, displayName)
       .run();
+  }
+
+  /**
+   * Break one caregiver link. Deliberately a hard delete rather than a flag: someone who
+   * has stepped back should stop appearing in the other person's list of who is watching
+   * them, not linger as an inactive row.
+   */
+  async unlinkChat(chatId: number, patientId: number, now: number): Promise<boolean> {
+    const res = await this.d1
+      .prepare("DELETE FROM chats WHERE chat_id = ?1 AND patient_id = ?2 AND role = 'caregiver'")
+      .bind(chatId, patientId)
+      .run();
+    const removed = num(res.meta.changes) > 0;
+    if (removed) {
+      await this.audit(patientId, 'caregiver_removed', String(chatId), { chatId }, now);
+    }
+    return removed;
+  }
+
+  async caregiversFor(patientId: number): Promise<Chat[]> {
+    const res = await this.d1
+      .prepare("SELECT * FROM chats WHERE patient_id = ?1 AND role = 'caregiver' AND active = 1 ORDER BY linked_at")
+      .bind(patientId)
+      .all<Row>();
+    return (res.results ?? []).map(rowToChat);
   }
 
   async deactivateChat(chatId: number, now: number): Promise<void> {
@@ -1255,6 +1288,7 @@ function rowToChat(r: Row): Chat {
   return {
     chatId: num(r['chat_id']),
     patientId: num(r['patient_id']),
+    displayName: strOrNull(r['display_name']),
     role: str(r['role']) as Chat['role'],
     canAck: bool(r['can_ack']),
     escalationTier: num(r['escalation_tier']),

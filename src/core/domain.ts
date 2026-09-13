@@ -266,6 +266,8 @@ export interface Patient {
 export interface Chat {
   chatId: number;
   patientId: number;
+  /** Who this chat belongs to, so lists name people rather than numbers. */
+  displayName: string | null;
   role: 'patient' | 'caregiver';
   canAck: boolean;
   escalationTier: number;

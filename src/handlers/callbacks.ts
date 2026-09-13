@@ -64,6 +64,57 @@ export async function handleCallback(
     return;
   }
 
+  // --- ending a caregiver arrangement ---------------------------------------
+  if (cb.a === 'unlink') {
+    // Either side may end it: the caregiver stepping back, or the patient removing them.
+    const isTheCaregiver = cb.chatId === chatId;
+    const isThePatient = links.some((l) => l.patientId === cb.patientId && l.role === 'patient');
+    if (!isTheCaregiver && !isThePatient) {
+      await ack('That is not yours to change.', true);
+      return;
+    }
+
+    const patient = await db.getPatient(cb.patientId);
+    const carers = await db.caregiversFor(cb.patientId);
+    const leaving = carers.find((c) => c.chatId === cb.chatId);
+
+    const removed = await db.unlinkChat(cb.chatId, cb.patientId, now);
+    if (!removed) {
+      await ack('That link is already gone.');
+      return;
+    }
+    await ack('Removed.');
+
+    const who = leaving?.displayName ?? 'Your backup';
+    const name = patient?.displayName ?? 'them';
+
+    if (isTheCaregiver) {
+      await tg.sendMessage(chatId, `👋 You've stopped backing up <b>${esc(name)}</b>.`);
+    } else {
+      await tg.sendMessage(chatId, `✖️ <b>${esc(who)}</b> is no longer your backup.`);
+    }
+
+    // Whoever did not press the button still needs to know the arrangement has ended --
+    // on one side someone believes they are being watched, on the other someone believes
+    // they are watching.
+    if (!isTheCaregiver) {
+      await tg.sendMessage(
+        cb.chatId,
+        `👋 <b>${esc(name)}</b> has removed you as their backup. You won't get their reminders any more.`,
+      );
+    } else {
+      for (const chat of await db.chatsFor(cb.patientId)) {
+        if (chat.role !== 'patient') continue;
+        await tg.sendMessage(
+          chat.chatId,
+          `🛟 <b>${esc(who)}</b> has stopped being your backup.\n\n` +
+            'Nobody else will be told if you miss something. Send /invite to set up someone new.',
+        );
+      }
+    }
+    return;
+  }
+
   // --- the tap-through editor ----------------------------------------------
   if (cb.a === 'editMenu' || cb.a === 'editSet') {
     const med = await db.getMed(cb.medId);

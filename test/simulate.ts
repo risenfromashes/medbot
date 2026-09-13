@@ -116,6 +116,7 @@ export function makeMed(over: Partial<Medicine> & { medKey: string; id: number }
 export function makeChat(over: Partial<Chat> & { chatId: number }): Chat {
   return {
     patientId: 1,
+    displayName: null,
     role: 'patient',
     canAck: true,
     escalationTier: 0,

@@ -96,7 +96,8 @@ The bot shows you exactly what it understood, in plain English, and waits for yo
 Apply. Read it against the paper before you do — it's reading handwriting, and so are you.
 
 **5. Add your backup person.** Send `/invite`, get a code, give it to them. They send
-`/start <code>` to the same bot and they're set.
+`/caregiver <code>` to the same bot and they're set. Either of you can end it later —
+they with `/leave`, you from the buttons under `/patients`.
 
 ---
 

@@ -156,6 +156,26 @@ Nagging stops while you're asleep and resumes in the morning. Each nudge is a ne
 with the previous one deleted, because editing a Telegram message doesn't produce a
 notification, and a nudge nobody is notified about isn't a nudge.
 
+### Joining, and leaving
+
+Two kinds of invite code, deliberately not interchangeable. A **joining** code creates a
+new person in the group and is redeemed with `/start`; a **caregiver** code links you as
+someone's backup and is redeemed with `/caregiver`. Offering one to the wrong command is
+refused *without consuming it* — these are single use, and burning one on the wrong command
+would leave someone holding a dead code with no idea why.
+
+Either side can end a caregiver arrangement: the caregiver with `/leave`, the patient from
+the buttons under `/patients`. Both parties are told when it ends, because otherwise one
+person believes they are being watched and the other believes they are watching.
+
+That `/leave` exists at all matters for safety, not just courtesy: a caregiver who cannot
+step back will mute the bot instead, and a muted caregiver is a safety net that looks
+present and is not.
+
+A chat cannot become a backup for a patient it already owns. This is not hypothetical —
+the upsert used to overwrite `role='patient'` with `'caregiver'`, leaving a patient with no
+tier-0 chat and nobody being reminded first-hand, while the link looked perfectly healthy.
+
 ### Escalation
 
 Every chat linked to a patient has a tier. Tier 0 — the patient — gets everything

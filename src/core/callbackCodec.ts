@@ -27,6 +27,8 @@ export type Callback =
   /** One of the suggested values inside that menu. */
   | { a: 'editSet'; medId: number; field: string; value: string }
   | { a: 'cancelImport'; versionId: number }
+  /** Break a caregiver link, from either side. */
+  | { a: 'unlink'; chatId: number; patientId: number }
   | { a: 'noop' };
 
 const b36 = (n: number): string => Math.round(n).toString(36);
@@ -52,6 +54,7 @@ export function encodeCallback(cb: Callback): string {
     case 'editSet': return `S.${b36(cb.medId)}.${cb.field}.${cb.value}`;
     case 'confirmImport': return `i.${b36(cb.versionId)}`;
     case 'cancelImport': return `c.${b36(cb.versionId)}`;
+    case 'unlink': return `U.${b36(Math.abs(cb.chatId))}.${cb.chatId < 0 ? 'n' : 'p'}.${b36(cb.patientId)}`;
     case 'noop': return '-';
   }
 }
@@ -87,6 +90,15 @@ export function decodeCallback(data: string): Callback {
         : { a: 'noop' };
     case 'i': return valid(n(1)) ? { a: 'confirmImport', versionId: n(1) } : { a: 'noop' };
     case 'c': return valid(n(1)) ? { a: 'cancelImport', versionId: n(1) } : { a: 'noop' };
+    case 'U': {
+      // Group chat ids are negative, so the sign travels separately.
+      const magnitude = n(1);
+      const sign = parts[2] === 'n' ? -1 : 1;
+      const patientId = un36(parts[3] ?? '');
+      return Number.isFinite(magnitude) && magnitude > 0 && Number.isFinite(patientId) && patientId > 0
+        ? { a: 'unlink', chatId: sign * magnitude, patientId }
+        : { a: 'noop' };
+    }
     default: return { a: 'noop' };
   }
 }

@@ -46,7 +46,8 @@ export const COMMANDS = [
   { command: 'invite', description: 'Get a code so someone can back you up' },
   { command: 'patients', description: 'Who this chat is linked to' },
   { command: 'settings', description: 'Your day, timezone and reminder settings' },
-  { command: 'caregiver', description: 'Link this chat as a backup for someone' },
+  { command: 'caregiver', description: 'Become someone\'s backup, with their code' },
+  { command: 'leave', description: 'Stop being someone\'s backup' },
   { command: 'help', description: 'How all of this works' },
 ];
 
@@ -128,6 +129,7 @@ export async function handleCommand(ctx: CmdCtx, msg: TgIncomingMessage): Promis
     case 'settings': return cmdSettings(ctx, args);
     case 'invite': return cmdInvite(ctx);
     case 'caregiver': case 'watch': return cmdCaregiver(ctx, args);
+    case 'leave': case 'unwatch': return cmdLeave(ctx, args);
     case 'health': return cmdHealth(ctx);
     default:
       if (cmd === '') return freeText(ctx, text);
@@ -168,8 +170,18 @@ async function cmdStart(ctx: CmdCtx, args: string): Promise<void> {
   // Single use and expiring, rather than one fixed password that would let anyone in
   // forever once it leaked.
   const adb = new AdminDb(ctx.env.MEDBOT_DB);
-  const result = await adb.redeemInvite(code, ctx.chatId, ctx.now);
+  const result = await adb.redeemInvite(code, ctx.chatId, ctx.now, 'enrol');
   if (!result.ok) {
+    if (result.reason === 'wrong_kind') {
+      // Not consumed, so the code still works -- on the right command.
+      await reply(
+        ctx,
+        "That's a <b>caregiver</b> code, for looking after someone who already uses this bot.\n\n" +
+          `Send <code>/caregiver ${esc(code.toUpperCase())}</code> instead.\n\n` +
+          '<i>If you meant to join as a new member, ask for a joining code instead.</i>',
+      );
+      return;
+    }
     const why =
       result.reason === 'used' ? 'That code has already been used.'
       : result.reason === 'expired' ? 'That code has expired.'
@@ -178,23 +190,8 @@ async function cmdStart(ctx: CmdCtx, args: string): Promise<void> {
     return;
   }
 
-  const invite = result.invite!;
-
-  if (invite.kind === 'caregiver' && invite.patientId !== null) {
-    const patient = await ctx.db.getPatient(invite.patientId);
-    const delay = invite.escalateAfterMs ?? 5 * MINUTE;
-    await ctx.db.linkChat(ctx.chatId, invite.patientId, 'caregiver', 1, delay, ctx.now);
-    await reply(
-      ctx,
-      `✅ You're now the backup for <b>${esc(patient?.displayName ?? 'them')}</b>.\n\n` +
-        `If they don't answer a reminder within ${fmtDuration(delay)} — medicines, meals, waking up, ` +
-        "going to bed — I'll ask you instead, and you can answer on their behalf. Otherwise I'll leave you alone.",
-    );
-    return;
-  }
-
   const patientId = await ctx.db.createPatient(ctx.userName, 'UTC', ctx.now);
-  await ctx.db.linkChat(ctx.chatId, patientId, 'patient', 0, 5 * MINUTE, ctx.now);
+  await ctx.db.linkChat(ctx.chatId, patientId, 'patient', 0, 5 * MINUTE, ctx.now, ctx.userName);
   await reply(
     ctx,
     `👋 Hello ${esc(ctx.userName)}.\n\n` +
@@ -205,6 +202,66 @@ async function cmdStart(ctx: CmdCtx, args: string): Promise<void> {
       "Don't have the JSON? Photograph your prescription, give it to any AI chatbot with the " +
       'template from /help, and paste back what it gives you. I check it carefully before anything takes effect.',
   );
+}
+
+/**
+ * Step back from looking after someone.
+ *
+ * Worth having for its own sake -- people's circumstances change -- but also because a
+ * caregiver who cannot leave will mute the bot instead, and a muted caregiver is a safety
+ * net that looks present and is not.
+ */
+async function cmdLeave(ctx: CmdCtx, args: string): Promise<void> {
+  const links = (await ctx.db.linksForChat(ctx.chatId)).filter((l) => l.role === 'caregiver');
+  if (links.length === 0) {
+    await reply(ctx, "You're not backing anyone up at the moment.");
+    return;
+  }
+
+  const named: Array<{ patientId: number; name: string }> = [];
+  for (const l of links) {
+    const p = await ctx.db.getPatient(l.patientId);
+    named.push({ patientId: l.patientId, name: p?.displayName ?? `#${l.patientId}` });
+  }
+
+  const query = args.trim().toLowerCase();
+  const matches = query === '' ? named : named.filter((n) => n.name.toLowerCase().includes(query));
+
+  if (matches.length === 0) {
+    await reply(ctx, `You're not backing up anyone called "${esc(args.trim())}".`);
+    return;
+  }
+
+  // More than one and no way to tell which: ask rather than guess. Quietly removing the
+  // wrong person's safety net would be a bad way to be helpful.
+  if (matches.length > 1) {
+    await reply(ctx, 'Which one?\n' + matches.map((m) => `• <code>/leave ${esc(m.name)}</code>`).join('\n'));
+    return;
+  }
+
+  const target = matches[0]!;
+  const removed = await ctx.db.unlinkChat(ctx.chatId, target.patientId, ctx.now);
+  if (!removed) {
+    await reply(ctx, 'That link is already gone.');
+    return;
+  }
+
+  await reply(
+    ctx,
+    `👋 You've stopped backing up <b>${esc(target.name)}</b>.\n\n` +
+      "You won't get their reminders any more. They can send you a new code with /invite if that changes.",
+  );
+
+  // They must know their safety net has gone. Silence would leave them believing someone
+  // is watching who is not.
+  for (const chat of await ctx.db.chatsFor(target.patientId)) {
+    if (chat.role !== 'patient') continue;
+    await ctx.tg.sendMessage(
+      chat.chatId,
+      `🛟 <b>${esc(ctx.userName)}</b> has stopped being your backup.\n\n` +
+        'Nobody else will be told if you miss something. Send /invite to set up someone new.',
+    );
+  }
 }
 
 async function cmdInvite(ctx: CmdCtx): Promise<void> {
@@ -256,8 +313,16 @@ async function cmdCaregiver(ctx: CmdCtx, args: string): Promise<void> {
   }
 
   const adb = new AdminDb(ctx.env.MEDBOT_DB);
-  const result = await adb.redeemInvite(code, ctx.chatId, ctx.now);
+  const result = await adb.redeemInvite(code, ctx.chatId, ctx.now, 'caregiver');
   if (!result.ok) {
+    if (result.reason === 'wrong_kind') {
+      await reply(
+        ctx,
+        "That's a <b>joining</b> code, for someone new to this bot.\n\n" +
+          `Send <code>/start ${esc(code.toUpperCase())}</code> instead.`,
+      );
+      return;
+    }
     const why =
       result.reason === 'used' ? 'That code has already been used.'
       : result.reason === 'expired' ? 'That code has expired.'
@@ -267,20 +332,42 @@ async function cmdCaregiver(ctx: CmdCtx, args: string): Promise<void> {
   }
 
   const invite = result.invite!;
-  if (invite.kind !== 'caregiver' || invite.patientId === null) {
-    await reply(ctx, 'That code is for joining as a new member. Send <code>/start ' + esc(code) + '</code> instead.');
+  if (invite.patientId === null) {
+    await reply(ctx, 'That code is missing the person it belongs to. Ask them to run /invite again.');
+    return;
+  }
+
+  // Backing up yourself is not a safety net; it is the same person twice. Refuse rather
+  // than create a link that looks like cover and provides none.
+  const existing = await ctx.db.linksForChat(ctx.chatId);
+  if (existing.some((l) => l.patientId === invite.patientId && l.role === 'patient')) {
+    await reply(
+      ctx,
+      "That's your own code — you can't be your own backup.\n\n" +
+        'Give it to someone else, and they send <code>/caregiver ' + esc(code.toUpperCase()) + '</code>.',
+    );
     return;
   }
 
   const delay = invite.escalateAfterMs ?? 5 * MINUTE;
   const patient = await ctx.db.getPatient(invite.patientId);
-  await ctx.db.linkChat(ctx.chatId, invite.patientId, 'caregiver', 1, delay, ctx.now);
+  await ctx.db.linkChat(ctx.chatId, invite.patientId, 'caregiver', 1, delay, ctx.now, ctx.userName);
   await reply(
     ctx,
     `✅ You're now the backup for <b>${esc(patient?.displayName ?? 'them')}</b>.\n\n` +
       `If they don't answer within ${fmtDuration(delay)} — medicines, meals, waking up, going to bed — ` +
-      "I'll ask you instead, and you can answer on their behalf. Otherwise I'll leave you alone.",
+      "I'll ask you instead, and you can answer on their behalf. Otherwise I'll leave you alone.\n\n" +
+      '<i>You can step back at any time with /leave.</i>',
   );
+  // Tell them their safety net is in place, from the chat that will be doing the asking.
+  for (const chat of await ctx.db.chatsFor(invite.patientId)) {
+    if (chat.role !== 'patient') continue;
+    await ctx.tg.sendMessage(
+      chat.chatId,
+      `🛟 <b>${esc(ctx.userName)}</b> is now your backup. If you don't answer something within ` +
+        `${fmtDuration(delay)}, I'll ask them instead.`,
+    );
+  }
 }
 
 // --- day state -----------------------------------------------------------
@@ -1231,26 +1318,61 @@ async function cmdAdd(ctx: CmdCtx, args: string): Promise<void> {
   await reply(ctx, `➕ <b>Added</b>\n${added}${warnings}`);
 }
 
-/** Who this chat can see and answer for. */
+/** Who this chat can see and answer for, and who is watching over this patient. */
 async function cmdPatients(ctx: CmdCtx): Promise<void> {
   const links = await ctx.db.linksForChat(ctx.chatId);
   if (links.length === 0) return needsSetup(ctx);
 
-  const lines: string[] = ['<b>This chat is linked to</b>'];
-  for (const l of links) {
+  const lines: string[] = [];
+  const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+
+  const own = links.filter((l) => l.role === 'patient');
+  const watching = links.filter((l) => l.role === 'caregiver');
+
+  for (const l of own) {
     const p = await ctx.db.getPatient(l.patientId);
     if (p === null) continue;
     const z = zoneFor(p.tz);
     const meds = await ctx.db.medsFor(l.patientId);
     lines.push(
-      `\n• <b>${esc(p.displayName)}</b> — ${l.role === 'patient' ? 'you' : 'you are their backup'}\n` +
+      `<b>${esc(p.displayName)}</b> — you\n` +
         `  ${p.wakeState === 'awake' ? '☀️ awake' : '🌙 asleep'} · ${z.fmtTime12(ctx.now)} ${esc(p.tz)}\n` +
-        `  ${meds.length} active medicine${meds.length === 1 ? '' : 's'}` +
-        (l.escalationTier > 0 ? ` · told after ${fmtDuration(l.escalateAfterMs)} of silence` : ''),
+        `  ${meds.length} active medicine${meds.length === 1 ? '' : 's'}`,
     );
+
+    // Who is backing this person up, and a button to end each arrangement.
+    const carers = await ctx.db.caregiversFor(l.patientId);
+    if (carers.length === 0) {
+      lines.push('  <i>Nobody is backing you up. /invite sets that up.</i>');
+    } else {
+      lines.push('  <b>Backed up by</b>');
+      for (const c of carers) {
+        lines.push(`  • ${esc(c.displayName ?? `chat ${c.chatId}`)} — told after ${fmtDuration(c.escalateAfterMs)}`);
+        buttons.push([{
+          text: `✖️ Remove ${(c.displayName ?? 'backup').slice(0, 24)}`,
+          callback_data: encodeCallback({ a: 'unlink', chatId: c.chatId, patientId: l.patientId }),
+        }]);
+      }
+    }
+    lines.push('');
   }
-  lines.push('\n<i>Use /invite to let someone back you up.</i>');
-  await reply(ctx, lines.join('\n'));
+
+  for (const l of watching) {
+    const p = await ctx.db.getPatient(l.patientId);
+    if (p === null) continue;
+    lines.push(
+      `<b>${esc(p.displayName)}</b> — you are their backup\n` +
+        `  told after ${fmtDuration(l.escalateAfterMs)} of silence`,
+    );
+    buttons.push([{
+      text: `👋 Stop backing up ${p.displayName.slice(0, 20)}`,
+      callback_data: encodeCallback({ a: 'unlink', chatId: ctx.chatId, patientId: l.patientId }),
+    }]);
+    lines.push('');
+  }
+
+  lines.push('<i>/invite gives someone a code to back you up. /leave steps back from someone.</i>');
+  await reply(ctx, lines.join('\n'), buttons.length > 0 ? buttons : undefined);
 }
 
 /**

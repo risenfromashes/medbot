@@ -47,7 +47,7 @@ export interface Invite {
 export interface RedeemResult {
   ok: boolean;
   invite?: Invite;
-  reason?: 'unknown' | 'used' | 'expired';
+  reason?: 'unknown' | 'used' | 'expired' | 'wrong_kind';
 }
 
 export class AdminDb {
@@ -298,7 +298,12 @@ export class AdminDb {
    * Claims an invite atomically. The single-use guarantee rides in the WHERE clause --
    * two people redeeming the same code at once would otherwise both succeed.
    */
-  async redeemInvite(code: string, chatId: number, now: number): Promise<RedeemResult> {
+  async redeemInvite(
+    code: string,
+    chatId: number,
+    now: number,
+    expect?: 'enrol' | 'caregiver',
+  ): Promise<RedeemResult> {
     const normalised = code.trim().toUpperCase();
     const row = await this.d1.prepare('SELECT * FROM invites WHERE code = ?1').bind(normalised).first<Row>();
     if (row === null) return { ok: false, reason: 'unknown' };
@@ -306,6 +311,12 @@ export class AdminDb {
     const invite = rowToInvite(row);
     if (invite.usedAt !== null) return { ok: false, invite, reason: 'used' };
     if (invite.expiresAt < now) return { ok: false, invite, reason: 'expired' };
+    // Checked BEFORE the claim, so offering a caregiver code to /start does not burn it.
+    // These codes are single use; consuming one on the wrong command would leave the
+    // person holding a dead code and no idea why.
+    if (expect !== undefined && invite.kind !== expect) {
+      return { ok: false, invite, reason: 'wrong_kind' };
+    }
 
     const res = await this.d1
       .prepare('UPDATE invites SET used_at = ?2, used_by_chat = ?3 WHERE code = ?1 AND used_at IS NULL AND expires_at >= ?2')
@@ -373,7 +384,7 @@ export class AdminDb {
     patient: Patient;
     meds: Medicine[];
     liveDoses: Dose[];
-    chats: Array<{ chatId: number; role: string; tier: number; escalateAfterMs: number }>;
+    chats: Array<{ chatId: number; displayName: string | null; role: string; tier: number; escalateAfterMs: number }>;
     adherence: Array<{ medId: number; status: string; n: number }>;
     recent: Dose[];
     prescriptionJson: string | null;
@@ -413,6 +424,7 @@ export class AdminDb {
       liveDoses: (dRes?.results ?? []).map(rowToDoseLite),
       chats: (cRes?.results ?? []).map((r) => ({
         chatId: num(r['chat_id']),
+        displayName: strOrNull(r['display_name']),
         role: str(r['role']),
         tier: num(r['escalation_tier']),
         escalateAfterMs: num(r['escalate_after_ms']),
@@ -428,7 +440,7 @@ export class AdminDb {
   /** Nodes and edges for the caregiver relationship graph. */
   async relationships(): Promise<{
     patients: Array<{ id: number; name: string }>;
-    links: Array<{ chatId: number; patientId: number; role: string; tier: number; escalateAfterMs: number }>;
+    links: Array<{ chatId: number; patientId: number; displayName: string | null; role: string; tier: number; escalateAfterMs: number }>;
   }> {
     const [pRes, cRes] = await this.d1.batch<Row>([
       this.d1.prepare('SELECT id, display_name FROM patients ORDER BY display_name'),
@@ -439,6 +451,7 @@ export class AdminDb {
       links: (cRes?.results ?? []).map((r) => ({
         chatId: num(r['chat_id']),
         patientId: num(r['patient_id']),
+        displayName: strOrNull(r['display_name']),
         role: str(r['role']),
         tier: num(r['escalation_tier']),
         escalateAfterMs: num(r['escalate_after_ms']),
