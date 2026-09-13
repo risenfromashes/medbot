@@ -94,6 +94,29 @@ the patient's behalf.
 This applies to *every* kind of prompt: medicines, meals, waking, sleeping. There's no kind
 of question that can quietly die in a chat nobody is looking at.
 
+### Taking a dose early
+
+`/took antibiotic drop` works before the bot has asked. Someone already up and holding the bottle has
+taken that dose, and the chain re-bases from when they really did it.
+
+How far "early" may go is bounded by the medicine's own safety floor, not by the schedule:
+a stated time is accepted as long as it is far enough after the previous dose. That is the
+only constraint that matters clinically. A time too soon after the last dose is still
+recorded -- the patient is saying what happened -- but flagged, so nobody doubles up on
+the strength of it.
+
+Which slot a stated time refers to is decided by nearest match. "I took it at 5" said at 7,
+when the 5pm dose was already written off, corrects the 5pm one; said at 5, when the dose
+is not due for another hour, resolves the pending one.
+
+### Order within a spacing group
+
+When several drops fall due together, which they usually do, the order is deliberate:
+an explicit `group_seq` from the prescription first, then plain medicines before tapering
+ones, then by name. The patient learns a sequence -- this drop, wait, that drop -- and a
+sequence that reshuffles itself is one they will get wrong. Putting the steady part of the
+routine first means only the changing medicine moves as the taper steps down.
+
 ### Correcting the past
 
 `/took antibiotic drop 5pm` works even if the bot already wrote that dose off. It finds the dose whose

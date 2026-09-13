@@ -26,6 +26,7 @@ export interface NormalizedMed {
   stepSpacingMs: number;
   spacingGroup: string | null;
   spacingMs: number;
+  groupSeq: number | null;
   phases: Phase[] | null;
   intervalMs: number | null;
   minGapMs: number;
@@ -215,7 +216,6 @@ export function parsePrescription(raw: unknown, opts: { now: number } = { now: D
 
   interface Draft extends NormalizedMed {
     group: string | null;
-    groupSeq: number;
   }
   const drafts: Draft[] = [];
   const seenKeys = new Set<string>();
@@ -303,6 +303,7 @@ export function parsePrescription(raw: unknown, opts: { now: number } = { now: D
       stepSpacingMs: 0,
       spacingGroup: null,
       spacingMs: 0,
+      groupSeq: typeof mr['group_seq'] === 'number' ? mr['group_seq'] : null,
       phases,
       intervalMs: parsed.intervalMs,
       minGapMs,
@@ -321,7 +322,6 @@ export function parsePrescription(raw: unknown, opts: { now: number } = { now: D
       courseUntil: course.until,
       specHash: '',
       group,
-      groupSeq: typeof mr['group_seq'] === 'number' ? mr['group_seq'] : drafts.length,
     };
 
     if (draft.critical && draft.awakeOnly) draft.awakeOnly = false;
@@ -353,6 +353,7 @@ export function parsePrescription(raw: unknown, opts: { now: number } = { now: D
     if (d.group !== null && (groupCounts.get(d.group) ?? 0) > 1) {
       med.spacingGroup = d.group;
       med.spacingMs = groupSpacing.get(d.group) ?? 10 * MINUTE;
+      // Keep whatever order the prescription gave; otherwise leave it to the tie-break.
       // Members of a spacing group must never share a message with anything, or the gap
       // the prescription asks for is meaningless.
       med.mergeable = false;
@@ -389,10 +390,9 @@ export function parsePrescription(raw: unknown, opts: { now: number } = { now: D
   };
 }
 
-function stripDraft(d: NormalizedMed & { group?: string | null; groupSeq?: number }): NormalizedMed {
-  const { group, groupSeq, ...rest } = d as NormalizedMed & { group: unknown; groupSeq: unknown };
+function stripDraft(d: NormalizedMed & { group?: string | null }): NormalizedMed {
+  const { group, ...rest } = d as NormalizedMed & { group: unknown };
   void group;
-  void groupSeq;
   return rest;
 }
 
@@ -554,8 +554,6 @@ function parseSchedule(
   }
 
   if (type === 'times_per_day') {
-    // Compiled down to wall-clock slots at import. Predictable for the patient, and it
-    // removes a whole scheduling branch along with its window-compression edge cases.
     const n = typeof sr['n'] === 'number' ? sr['n'] : typeof sr['count'] === 'number' ? sr['count'] : null;
     if (n === null || n < 1) {
       c.err(where, 'a times_per_day schedule needs "n", e.g. "n": 3');
@@ -563,6 +561,29 @@ function parseSchedule(
     }
     const from = c.wall(where, 'schedule.from', sr['from'], '08:00')!;
     const to = c.wall(where, 'schedule.to', sr['to'], '22:00')!;
+
+    // "Four times a day" for someone recovering at home means four times across their
+    // waking day, not at four fixed times regardless of when that day began. Anchoring on
+    // waking is the default: a patient who sleeps until ten should not start the day with
+    // a dose already two hours overdue.
+    if (sr['anchor'] !== 'clock') {
+      const a = parseWall(from);
+      const b = parseWall(to);
+      let span = (b.h * 60 + b.mi) - (a.h * 60 + a.mi);
+      if (span <= 0) span += 24 * 60;
+      const gap = n === 1 ? 24 * HOUR : Math.round((span / (n - 1)) * MINUTE);
+      c.warn(
+        where,
+        `${n}x a day became one dose on waking, then every ${Math.round(gap / MINUTE / 5) * 5} minutes` +
+          ` -- add "anchor": "clock" to pin it to fixed times instead`,
+      );
+      return {
+        kind: 'interval',
+        spec: { kind: 'interval', intervalMs: gap, anchor: 'wake' },
+        intervalMs: gap,
+      };
+    }
+
     const times = spreadTimes(from, to, n);
     c.warn(where, `${n}x a day became ${times.join(', ')} -- adjust with /edit if that does not suit`);
     return { kind: 'fixed_times', spec: { kind: 'fixed_times', times }, intervalMs: null };
@@ -629,8 +650,11 @@ function spreadTimes(from: string, to: string, n: number): string[] {
 export function describeSchedule(m: Pick<NormalizedMed, 'kind' | 'spec' | 'intervalMs'>): string {
   switch (m.kind) {
     case 'interval': {
-      const h = (m.intervalMs ?? 0) / HOUR;
-      const every = h >= 1 && Number.isInteger(h) ? `${h}h` : `${Math.round((m.intervalMs ?? 0) / MINUTE)}m`;
+      // "every 280m" is technically right and useless to read.
+      const total = Math.round((m.intervalMs ?? 0) / MINUTE);
+      const h = Math.floor(total / 60);
+      const mins = total % 60;
+      const every = h === 0 ? `${mins}m` : mins === 0 ? `${h}h` : `${h}h ${mins}m`;
       return `every ${every}${m.spec.anchor === 'wake' ? ' from waking' : ''}`;
     }
     case 'fixed_times':

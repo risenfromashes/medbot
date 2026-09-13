@@ -79,7 +79,8 @@ it will say which medicine and which field, so you can go back and fix it.
 >   drops), `"anchor": "clock"` for round-the-clock antibiotics.
 > - `{"type": "fixed_times", "times": ["08:00", "20:00"]}` — specific times of day.
 > - `{"type": "times_per_day", "n": 3, "from": "08:00", "to": "22:00"}` — "three times a
->   day" with no times given.
+>   day" with no times given. Spreads across the patient's waking day, starting when they
+>   actually get up; add `"anchor": "clock"` only if the times are genuinely fixed.
 > - `{"type": "meal", "meals": ["breakfast"], "relation": "before", "offset": "30m"}` —
 >   `relation` is `before`, `after` or `with`.
 > - `{"type": "as_needed"}` — PRN / SOS / "when needed". Add `"max_per_day"` and `"min_gap"`.

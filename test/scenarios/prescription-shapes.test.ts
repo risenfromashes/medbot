@@ -28,7 +28,9 @@ describe('parsing the real prescription', () => {
     expect(by.get('drop')!.intervalMs).toBe(2 * HOUR);
     expect(by.get('drop')!.courseKind).toBe('indefinite');
     expect(by.get('drop')!.courseDays).toBe(14);
-    expect(describeSchedule(by.get('drop')!)).toContain('at ');
+    // Four times a day, spread from whenever she actually gets up.
+    expect(by.get('drop')!.spec.anchor).toBe('wake');
+    expect(describeSchedule(by.get('drop')!)).toContain('from waking');
   });
 
   it('keeps all three drops ten minutes apart from each other', () => {
@@ -46,9 +48,9 @@ describe('parsing the real prescription', () => {
     expect(drop.phases!.length).toBe(2);
     expect(drop.phases![0]!.days).toBe(7);
     expect(drop.phases![1]!.days).toBe(7);
-    // Four slots in the first phase, three in the second.
-    expect(drop.phases![0]!.spec.times!.length).toBe(4);
-    expect(drop.phases![1]!.spec.times!.length).toBe(3);
+    // Four doses a day in the first phase, three in the second -- so the gap widens.
+    expect(drop.phases![0]!.intervalMs).toBeLessThan(drop.phases![1]!.intervalMs!);
+    expect(drop.phases![0]!.spec.anchor).toBe('wake');
     // The whole course is fourteen days, not seven.
     expect(drop.courseDays).toBe(14);
   });
@@ -75,7 +77,7 @@ describe('the taper in motion', () => {
   it('is in the four-a-day phase on day one', () => {
     const p = activePhase(med, z, z.localDay(at(0, '12:00')));
     expect(p.index).toBe(0);
-    expect(p.phase!.spec.times!.length).toBe(4);
+    expect(p.phase!.intervalMs).toBe(drop.phases![0]!.intervalMs);
   });
 
   it('is still in the first phase on day seven', () => {
@@ -85,7 +87,8 @@ describe('the taper in motion', () => {
   it('steps down to three a day on day eight', () => {
     const p = activePhase(med, z, z.localDay(at(7, '12:00')));
     expect(p.index).toBe(1);
-    expect(p.phase!.spec.times!.length).toBe(3);
+    // The step-down means a longer gap between doses.
+    expect(p.phase!.intervalMs!).toBeGreaterThan(drop.phases![0]!.intervalMs!);
   });
 
   it('is finished after fourteen days', () => {
@@ -194,5 +197,135 @@ describe('three differently-scheduled drops, ten minutes apart', () => {
     expect(lubricant, `lubricant only dosed ${lubricant} times in 15 hours`).toBeGreaterThanOrEqual(5);
     // While the four-times-a-day drop stays at four.
     expect(w.takenTimes('drop').length).toBeLessThanOrEqual(5);
+  });
+});
+
+describe('taking a dose before the bot asks', () => {
+  const med = makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 4 * HOUR, minGapMs: 3 * HOUR });
+
+  it('resolves the pending dose and re-bases from the real time', async () => {
+    const { resolveRetro } = await import('../../src/core/retro.js');
+    // Dose is not due until 19:00; she put the drop in at 18:00 because she was up.
+    const live = { id: 5, status: 'scheduled', effectiveDueAt: at(0, '19:00'), plannedDueAt: at(0, '19:00') } as never;
+    const r = resolveRetro({ med, live, recent: [], statedAt: at(0, '18:00'), now: at(0, '18:02') });
+    expect(r.kind).toBe('resolve_live');
+    if (r.kind === 'resolve_live') expect(r.takenAt).toBe(at(0, '18:00'));
+  });
+
+  it('accepts it even hours early, as long as the safety gap holds', async () => {
+    const { resolveRetro } = await import('../../src/core/retro.js');
+    const prior = { id: 4, status: 'taken', takenAt: at(0, '10:00'), step: 0, plannedDueAt: at(0, '10:00') } as never;
+    const live = { id: 5, status: 'scheduled', effectiveDueAt: at(0, '19:00'), plannedDueAt: at(0, '19:00') } as never;
+    const r = resolveRetro({ med, live, recent: [prior], statedAt: at(0, '15:00'), now: at(0, '15:01') });
+    expect(r.kind).toBe('resolve_live');
+    if (r.kind === 'resolve_live') expect(r.warning).toBeUndefined();
+  });
+
+  it('still flags one taken too soon after the last', async () => {
+    const { resolveRetro } = await import('../../src/core/retro.js');
+    const prior = { id: 4, status: 'taken', takenAt: at(0, '17:00'), step: 0, plannedDueAt: at(0, '17:00') } as never;
+    const live = { id: 5, status: 'scheduled', effectiveDueAt: at(0, '21:00'), plannedDueAt: at(0, '21:00') } as never;
+    const r = resolveRetro({ med, live, recent: [prior], statedAt: at(0, '18:00'), now: at(0, '18:01') });
+    // An hour after a dose with a three-hour floor: recorded, because she says it happened,
+    // but flagged so nobody doubles up on the strength of it.
+    expect(r.kind).toBe('resolve_live');
+    if (r.kind === 'resolve_live') expect(r.warning).toBe('min_gap');
+  });
+
+  it('the whole chain moves when a dose is taken early', () => {
+    const w = new World({
+      start: at(0, '08:00'),
+      patient: {
+        wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'),
+        lastWakeAt: at(0, '07:00'), presumedSleepAt: '23:59', eveningPollAt: '23:50',
+      },
+      meds: [makeMed({ id: 1, medKey: 'antibiotic drop', intervalMs: 4 * HOUR, minGapMs: 3 * HOUR, driftPolicy: 'strict_actual' })],
+      chats: [makeChat({ chatId: 100 })],
+    });
+
+    w.tick();
+    w.take('antibiotic drop');                      // first dose at 08:00
+    w.run(2 * HOUR);                     // next is due 12:00
+
+    const pending = w.state.liveDoses[0]!;
+    expect(pending.effectiveDueAt).toBe(at(0, '12:00'));
+
+    // She takes it at 11:00, an hour early, before being asked.
+    w.now = at(0, '11:00');
+    w.resolve(pending.id, 'taken');
+    w.run(MINUTE);
+
+    // The next dose follows the real time, not the abandoned 12:00 slot.
+    expect(w.state.liveDoses[0]!.effectiveDueAt).toBe(at(0, '15:00'));
+  });
+});
+
+describe('the order drops are asked for', () => {
+  function dropWorld(): World {
+    return new World({
+      start: at(0, '07:59'),
+      patient: {
+        wakeState: 'awake', wakeConfidence: 'confirmed', wakeStateSince: at(0, '07:00'),
+        lastWakeAt: at(0, '07:00'), presumedSleepAt: '23:59', eveningPollAt: '23:50',
+      },
+      meds: [
+        // Declared out of order on purpose, and the tapering one listed first.
+        makeMed({ id: 1, medKey: 'tapering', name: 'Tapering drop', kind: 'fixed_times', intervalMs: null,
+          spec: { kind: 'fixed_times', times: ['08:00'] }, minGapMs: 3 * HOUR,
+          spacingGroup: 'drops', spacingMs: 10 * MINUTE, mergeable: false,
+          phases: [
+            { spec: { kind: 'fixed_times', times: ['08:00'] }, intervalMs: null, days: 7, label: 'a' },
+            { spec: { kind: 'fixed_times', times: ['08:00'] }, intervalMs: null, days: 7, label: 'b' },
+          ] }),
+        makeMed({ id: 2, medKey: 'steady', name: 'Steady drop', kind: 'fixed_times', intervalMs: null,
+          spec: { kind: 'fixed_times', times: ['08:00'] }, minGapMs: 3 * HOUR,
+          spacingGroup: 'drops', spacingMs: 10 * MINUTE, mergeable: false }),
+      ],
+      chats: [makeChat({ chatId: 100 })],
+    });
+  }
+
+  it('puts the plain drop before the tapering one when both fall due together', () => {
+    const w = dropWorld();
+    w.run(5 * MINUTE);
+
+    const byMed = new Map(w.state.liveDoses.map((d) => [d.medId, d.effectiveDueAt]));
+    const steady = byMed.get(2)!;
+    const tapering = byMed.get(1)!;
+    // The part of the routine that never changes stays put; the taper moves around it.
+    expect(steady, 'the tapering drop was asked for first').toBeLessThan(tapering);
+    expect(tapering - steady).toBeGreaterThanOrEqual(10 * MINUTE);
+  });
+
+  it('honours an explicit order from the prescription over that default', () => {
+    const w = dropWorld();
+    w.state.meds[0]!.groupSeq = 1; // tapering one explicitly first
+    w.state.meds[1]!.groupSeq = 2;
+    w.run(5 * MINUTE);
+
+    const byMed = new Map(w.state.liveDoses.map((d) => [d.medId, d.effectiveDueAt]));
+    expect(byMed.get(1)!, 'the explicit group_seq was ignored').toBeLessThan(byMed.get(2)!);
+  });
+
+  it('keeps the same order day after day', () => {
+    const w = dropWorld();
+    w.respectSchedule = true;
+    const sequences: string[] = [];
+
+    for (let i = 0; i < 3 * 24 * 60; i++) {
+      w.tick();
+      const prompted = w.state.liveDoses.filter((d) => d.status === 'prompted');
+      if (prompted.length === 1) {
+        const key = w.state.meds.find((m) => m.id === prompted[0]!.medId)!.medKey;
+        if (sequences[sequences.length - 1] !== key) sequences.push(key);
+        w.resolve(prompted[0]!.id, 'taken');
+      }
+      w.now += MINUTE;
+    }
+
+    // Every pair should read steady-then-tapering, never the reverse.
+    for (let i = 0; i + 1 < sequences.length; i += 2) {
+      expect([sequences[i], sequences[i + 1]]).toEqual(['steady', 'tapering']);
+    }
   });
 });

@@ -56,6 +56,8 @@ Schedule types, pick what matches:
   "clock" for round-the-clock antibiotics
 - {"type":"fixed_times","times":["08:00","20:00"]}
 - {"type":"times_per_day","n":3,"from":"08:00","to":"22:00"}
+  Spreads across the patient's waking day, starting when they get up.
+  Add "anchor":"clock" only if the times are genuinely fixed.
 - {"type":"meal","meals":["breakfast"],"relation":"before","offset":"30m"}
   relation is before, after or with
 - {"type":"as_needed"}  for PRN/SOS; add max_per_day and min_gap

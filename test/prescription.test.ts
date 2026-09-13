@@ -94,12 +94,24 @@ describe('prescription shorthands', () => {
     expect(r.value!.meds[0]!.spec.meal!.meal).toBe('dinner');
   });
 
-  it('spreads times_per_day across the waking window and says so', () => {
+  it('reads "3 times a day" as three doses spread from waking', () => {
+    // Four times a day means four times across the day the patient actually has. Pinning
+    // it to the clock would greet a late riser with a dose already hours overdue.
     const r = parsePrescription({
       medicines: [{ id: 'x', name: 'Y', schedule: { type: 'times_per_day', n: 3, from: '08:00', to: '20:00' } }],
     }, { now: NOW });
+    const m = r.value!.meds[0]!;
+    expect(m.kind).toBe('interval');
+    expect(m.spec.anchor).toBe('wake');
+    expect(m.intervalMs).toBe(6 * 60 * 60_000); // 12h window, 3 doses -> 6h apart
+    expect(r.warnings.join('\n')).toContain('one dose on waking');
+  });
+
+  it('still pins to the clock when asked to', () => {
+    const r = parsePrescription({
+      medicines: [{ id: 'x', name: 'Y', schedule: { type: 'times_per_day', n: 3, from: '08:00', to: '20:00', anchor: 'clock' } }],
+    }, { now: NOW });
     expect(r.value!.meds[0]!.spec.times).toEqual(['08:00', '14:00', '20:00']);
-    expect(r.warnings.join('\n')).toContain('3x a day became');
   });
 
   it('forces a critical medicine to be allowed to wake the patient', () => {

@@ -719,15 +719,15 @@ export class Db {
                steps_json, step_spacing_ms, interval_ms, min_gap_ms, onset_offset_ms, max_per_day,
                awake_only, critical, drift_policy, drift_tolerance_ms, catchup_grace_ms, nag_policy_json,
                mergeable, course_kind, course_days, course_doses, course_until, spacing_group, spacing_ms,
-               phases_json, status, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,'active',?29)`,
+               group_seq, phases_json, status, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,'active',?30)`,
           )
           .bind(
             patientId, m.medKey, m.name, m.doseText, m.notes, m.kind, JSON.stringify(m.spec), m.specHash,
             JSON.stringify(m.steps), m.stepSpacingMs, m.intervalMs, m.minGapMs, m.onsetOffsetMs, m.maxPerDay,
             m.awakeOnly ? 1 : 0, m.critical ? 1 : 0, m.driftPolicy, m.driftToleranceMs, m.catchupGraceMs,
             JSON.stringify(m.nagPolicy), m.mergeable ? 1 : 0, m.courseKind, m.courseDays, m.courseDoses,
-            m.courseUntil, m.spacingGroup, m.spacingMs,
+            m.courseUntil, m.spacingGroup, m.spacingMs, m.groupSeq,
             m.phases === null ? null : JSON.stringify(m.phases), now,
           ),
       ),
@@ -916,15 +916,15 @@ export class Db {
                  steps_json, step_spacing_ms, interval_ms, min_gap_ms, onset_offset_ms, max_per_day,
                  awake_only, critical, drift_policy, drift_tolerance_ms, catchup_grace_ms, nag_policy_json,
                  mergeable, course_kind, course_days, course_doses, course_until, spacing_group,
-                 spacing_ms, phases_json, status, version_id, created_at)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,'active',?29,?30)`,
+                 spacing_ms, group_seq, phases_json, status, version_id, created_at)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,'active',?30,?31)`,
             )
             .bind(
               patientId, m.medKey, m.name, m.doseText, m.notes, m.kind, JSON.stringify(m.spec), m.specHash,
               JSON.stringify(m.steps), m.stepSpacingMs, m.intervalMs, m.minGapMs, m.onsetOffsetMs, m.maxPerDay,
               m.awakeOnly ? 1 : 0, m.critical ? 1 : 0, m.driftPolicy, m.driftToleranceMs, m.catchupGraceMs,
               JSON.stringify(m.nagPolicy), m.mergeable ? 1 : 0, m.courseKind, m.courseDays, m.courseDoses,
-              m.courseUntil, m.spacingGroup, m.spacingMs,
+              m.courseUntil, m.spacingGroup, m.spacingMs, m.groupSeq,
               m.phases === null ? null : JSON.stringify(m.phases), versionId, now,
             ),
         );
@@ -942,7 +942,7 @@ export class Db {
                max_per_day = ?13, awake_only = ?14, critical = ?15, drift_policy = ?16, drift_tolerance_ms = ?17,
                catchup_grace_ms = ?18, nag_policy_json = ?19, mergeable = ?20, course_kind = ?21, course_days = ?22,
                course_doses = ?23, course_until = ?24, spacing_group = ?25, spacing_ms = ?26,
-               phases_json = ?27, status = 'active', version_id = ?28, next_step = 0
+               group_seq = ?27, phases_json = ?28, status = 'active', version_id = ?29, next_step = 0
              WHERE id = ?1`,
           )
           .bind(
@@ -950,7 +950,7 @@ export class Db {
             JSON.stringify(m.steps), m.stepSpacingMs, m.intervalMs, m.minGapMs, m.onsetOffsetMs, m.maxPerDay,
             m.awakeOnly ? 1 : 0, m.critical ? 1 : 0, m.driftPolicy, m.driftToleranceMs, m.catchupGraceMs,
             JSON.stringify(m.nagPolicy), m.mergeable ? 1 : 0, m.courseKind, m.courseDays, m.courseDoses,
-            m.courseUntil, m.spacingGroup, m.spacingMs,
+            m.courseUntil, m.spacingGroup, m.spacingMs, m.groupSeq,
             m.phases === null ? null : JSON.stringify(m.phases), versionId,
           ),
         this.d1
@@ -1248,6 +1248,7 @@ function rowToMed(r: Row): Medicine {
     stepSpacingMs: num(r['step_spacing_ms']),
     spacingGroup: strOrNull(r['spacing_group']),
     spacingMs: num(r['spacing_ms'] ?? 0),
+    groupSeq: numOrNull(r['group_seq']),
     phases: (() => {
       const raw = r['phases_json'];
       if (typeof raw !== 'string' || raw === '') return null;

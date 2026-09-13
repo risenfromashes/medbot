@@ -81,6 +81,7 @@ export function makeMed(over: Partial<Medicine> & { medKey: string; id: number }
     stepSpacingMs: 0,
     spacingGroup: null,
     spacingMs: 0,
+    groupSeq: null,
     phases: null,
     phaseIndex: 0,
     intervalMs: 2 * HOUR,

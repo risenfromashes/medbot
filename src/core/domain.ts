@@ -179,6 +179,8 @@ export interface Medicine {
    */
   spacingGroup: string | null;
   spacingMs: number;
+  /** Explicit order within a spacing group, when the prescription gives one. */
+  groupSeq: number | null;
   /** A tapering course. Null for the ordinary single-phase case. */
   phases: Phase[] | null;
   phaseIndex: number;

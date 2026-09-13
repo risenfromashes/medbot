@@ -53,8 +53,31 @@ export function applySpacing(
       if (m.med.lastTakenAt !== null) floor = Math.max(floor, m.med.lastTakenAt + spacing);
     }
 
-    // Earliest first, so the one that has been waiting longest goes next.
-    const ordered = [...members].sort((a, b) => a.dose.effectiveDueAt - b.dose.effectiveDueAt);
+    // Order within the group.
+    //
+    // Whichever is due first goes first -- but when several fall due together, which they
+    // usually do, the tie is broken deliberately rather than by whatever order the rows
+    // came back in:
+    //
+    //   1. an explicit `group_seq` from the prescription, if the doctor gave an order;
+    //   2. then plain medicines before tapering ones, so the steady part of the routine
+    //      stays put and only the changing one moves as the taper steps down;
+    //   3. then by name, so the sequence is at least stable day to day.
+    //
+    // Order matters here beyond tidiness: the patient learns a sequence, and a sequence
+    // that reshuffles itself is one they will get wrong.
+    const rank = (m: Medicine): [number, number, string] => [
+      m.groupSeq ?? 1000,
+      m.phases !== null && m.phases.length > 1 ? 1 : 0,
+      m.name,
+    ];
+    const ordered = [...members].sort((a, b) => {
+      const byDue = a.dose.effectiveDueAt - b.dose.effectiveDueAt;
+      if (Math.abs(byDue) > 60_000) return byDue;
+      const [as, at, an] = rank(a.med);
+      const [bs, bt, bn] = rank(b.med);
+      return as - bs || at - bt || an.localeCompare(bn);
+    });
 
     for (const item of ordered) {
       // A deferred dose is parked for sleep; leave it alone or it would be woken early.

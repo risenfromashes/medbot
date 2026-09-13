@@ -507,6 +507,7 @@ function rowToMedLite(r: Row): Medicine {
     stepSpacingMs: num(r['step_spacing_ms']),
     spacingGroup: strOrNull(r['spacing_group']),
     spacingMs: num(r['spacing_ms'] ?? 0),
+    groupSeq: numOrNull(r['group_seq']),
     phases: (() => {
       const raw = r['phases_json'];
       if (typeof raw !== 'string' || raw === '') return null;
