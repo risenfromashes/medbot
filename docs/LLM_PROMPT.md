@@ -5,6 +5,9 @@ genuinely hard part of this, reading a doctor's handwriting, is something you al
 a tool for. So do that part once, in whatever chatbot you already use, and paste the result
 into the bot.
 
+> **The easy way:** send `/prompt` to the bot and it will hand you this, ready to copy,
+> without needing to find this file at all. What follows is the same thing.
+
 ## What to do
 
 1. Photograph your prescription.

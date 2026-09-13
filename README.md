@@ -43,6 +43,11 @@ same time arrive as one checklist.
 one is logged as missed and the schedule moves on, so one ignored reminder can never freeze
 a medicine.
 
+**It tells you every evening what happened.** A short digest at a time you choose — taken,
+missed, course progress. If that stops arriving, something is wrong, and that is the
+cheapest possible way for a human to notice. A watchdog separately escalates any medicine
+that has gone quiet for far longer than its own cycle.
+
 **It lets you correct the past.** Took it and forgot to tap? `/took antibiotic drop 5pm`. If the bot
 already wrote that dose off as missed, it flips it back, recalculates from the real time,
 and keeps both values in the log.
@@ -62,79 +67,59 @@ About ten minutes.
 Message [@BotFather](https://t.me/BotFather) on Telegram, send `/newbot`, pick a name.
 He gives you a token that looks like `123456789:AAE...`. Keep it — it is a password.
 
-### 2. Deploy
+### 2. Run the setup script
 
 ```bash
-git clone <this repo> && cd medbot
+git clone https://github.com/risenfromashes/medbot.git && cd medbot
 npm install
-
-npx wrangler login                        # opens a browser
-npx wrangler d1 create medbot             # prints a database_id
+npx wrangler login     # opens a browser
+npm run setup
 ```
 
-Put that `database_id` into `wrangler.jsonc`, replacing `REPLACE_WITH_YOUR_DATABASE_ID`.
-Then:
+`npm run setup` does the rest: verifies the bot token, creates the D1 database, runs the
+migrations, generates and uploads the secrets, **measures how fast password hashing is on
+this machine and calibrates the work factor to fit Cloudflare's CPU budget**, deploys,
+registers the webhook, and creates your admin account.
 
-```bash
-npx wrangler d1 migrations apply MEDBOT_DB --remote
+It prints the generated admin password once and writes it to `medbot-credentials.json`
+(gitignored, `chmod 600`). It is idempotent — re-running it will never regenerate a
+password you have already changed.
 
-npx wrangler secret put TELEGRAM_BOT_TOKEN   # paste the BotFather token
-npx wrangler secret put WEBHOOK_SECRET       # any long random string
+### 3. Sign in and invite yourself
 
-npx wrangler deploy
-```
-
-Generate the random string with `openssl rand -hex 32`. There is no join password to set —
-joining is by single-use invite code, minted from the dashboard.
-
-### 3. Connect it to Telegram, and get your admin password
-
-Open this once in a browser, using the `WEBHOOK_SECRET` you just set:
+Open the dashboard URL it printed, sign in, and change the password. The overview page
+shows a join code; send it to the bot in Telegram:
 
 ```
-https://medbot.<your-subdomain>.workers.dev/setup?key=<WEBHOOK_SECRET>
-```
-
-That registers the webhook, publishes the command menu, and creates the single admin
-account. **It shows you a generated password exactly once** — save it. There is no
-recovery: the only way to get a new one is to reset the account.
-
-### 4. Sign in and invite yourself
-
-Go to `https://medbot.<your-subdomain>.workers.dev/app` and sign in as `admin`. Change the
-password, then use the join code on the overview page.
-
-### 5. Say hello
-
-In Telegram, send your bot:
-
-```
-/start <the join code from the dashboard>
+/start <the join code>
 /tz Asia/Dhaka
-/import
+/prompt          ← the prompt for turning a prescription photo into JSON
+/import          ← then paste what the chatbot gives you
 ```
 
-Then paste your prescription JSON. **[docs/LLM_PROMPT.md](docs/LLM_PROMPT.md)** has a
-prompt you can give any AI chatbot along with a photo of your prescription — that's the
-easy way to produce it. The bot shows you exactly what would change and waits for you to
-confirm.
+### 4. Add your backup person
 
-### 6. Add your backup person
-
-Either mint a caregiver code in the dashboard, or send `/invite` in Telegram. Give them the
-code; they open the bot and send `/start <code>`. From then on, anything you haven't
-answered within five minutes goes to them too.
+Mint a caregiver code in the dashboard, or send `/invite` in Telegram. Give them the code;
+they open the bot and send `/start <code>`. From then on, anything you haven't answered
+within five minutes goes to them too.
 
 Invite codes are **single use and expire in 24 hours** — there is no permanent password
 that opens your deployment forever.
 
----
+### Later on
+
+```bash
+npm run status           # what is deployed and running
+npm run reset-password   # issue a new admin password
+npm run calibrate        # re-tune password hashing to this runtime
+npm run deploy           # migrate and push code
+```
 
 ## Using it
 
 ```
 /start <code>      join, using an invite code
-/status            what's waiting, what's next
+/status            what's waiting, what's next, and today so far
 /awake  /sleep     start and end your day (accepts a past time: /awake 6:30am)
 /ate lunch         meal-timed medicines need this
 /took antibiotic drop         log a dose
@@ -143,7 +128,11 @@ that opens your deployment forever.
 /skip antibiotic drop         /snooze antibiotic drop 15m
 /meds              medicines, schedules, course progress
 /log 7             adherence for the last week
-/import  /export   change the prescription
+/prompt            the prompt for converting a prescription photo
+/import  /export   replace the whole prescription
+/add {...}         add one medicine
+/edit antibiotic drop every 3h    change one thing
+/extend antibiotic drop 3d        lengthen a course
 /pause  /resume  /stop
 /tz Asia/Dhaka
 /invite  /caregiver
@@ -228,6 +217,12 @@ A few decisions worth knowing about:
 - **A dropped cron is harmless.** The tick asks "what is due at or before now", never "what
   is due this minute", so a late or missing tick self-heals rather than losing a dose or
   firing a burst of catch-up nags.
+- **A send that fails is queued, not lost.** A Worker gets 50 subrequests and Telegram
+  rate-limits per chat, so a busy tick can genuinely run out of room mid-fan-out. Anything
+  undelivered goes to a priority queue and is retried with backoff on a later tick —
+  critical medicines first, so a backlog of digests can never stand in front of a dose.
+- **The password work factor is calibrated, not hardcoded.** It lives in the database and
+  is set by measuring the real cost at deploy time; see the security note above.
 
 ### Development
 
@@ -243,3 +238,25 @@ stopped.
 ## Licence
 
 MIT.
+
+## One-click install
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/risenfromashes/medbot)
+
+Cloudflare forks the repository, provisions the D1 database, runs the migrations and
+deploys — you supply the bot token. Afterwards, open `/setup?key=<WEBHOOK_SECRET>` once to
+register the webhook and create your admin account.
+
+For anything beyond the first install — resetting a password, re-tuning the hash cost,
+rotating the webhook secret — use the script:
+
+```bash
+npm run setup            # first-time deploy, end to end
+npm run status           # what is deployed and running
+npm run reset-password   # issue a new admin password
+npm run calibrate        # re-tune password hashing to this runtime
+npm run deploy           # migrate and push code
+```
+
+`setup` is idempotent: it will not regenerate an admin password that already exists, so
+re-running it after you have changed yours is safe.

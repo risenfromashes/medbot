@@ -14,22 +14,30 @@
 const ENC = new TextEncoder();
 
 /**
- * Tuned against the free plan's CPU ceiling, measured on the real runtime rather than
- * guessed: 60k cost 11-17ms of CPU on workerd, against a documented budget of 10ms per
- * request. Those requests did succeed, but building on top of an undocumented grace
- * margin is how a login page stops working after a platform change. Changing a password
- * hashes twice (verify the old, derive the new), so the figure that has to fit is double
- * this one.
+ * The work factor is NOT a constant in this file.
  *
- * This is well below the ~600k OWASP suggests for PBKDF2-SHA256. What compensates:
- * the initial password is generated with ~114 bits of entropy, so its iteration count is
- * irrelevant; a chosen one must be at least 12 characters; logins are throttled per
- * source address; and an offline attack needs the D1 database, which needs the Cloudflare
- * account, at which point the medical data is already exposed anyway.
+ * It belongs in the database, set once at deploy time by `scripts/medbot.mjs calibrate`,
+ * which measures the real cost and picks the largest value that fits a target budget.
+ * Hard-coding it would mean either guessing high and having logins killed by the CPU
+ * limit, or guessing low forever on hardware that could afford more.
  *
- * Stored per-row, so raising this later does not invalidate an existing password.
+ * Whatever is chosen is stored per password row as well, so raising it later re-hashes
+ * lazily instead of locking anyone out.
  */
-export const PBKDF2_ITERATIONS = 25_000;
+
+/** Used only when nothing has been calibrated yet. Deliberately conservative: this must
+ *  fit the Workers free plan's 10ms CPU budget on the slowest runtime we might land on. */
+export const DEFAULT_ITERATIONS = 12_000;
+
+/** Refused outright -- a misconfiguration should not silently weaken the hash. */
+export const MIN_ITERATIONS = 1_000;
+export const MAX_ITERATIONS = 2_000_000;
+
+export function clampIterations(n: number): number {
+  if (!Number.isFinite(n)) return DEFAULT_ITERATIONS;
+  return Math.max(MIN_ITERATIONS, Math.min(MAX_ITERATIONS, Math.round(n)));
+}
+
 const KEY_BITS = 256;
 
 export const SESSION_TTL_MS = 14 * 24 * 3600_000;
@@ -83,7 +91,7 @@ export function generatePassword(): string {
 export async function hashPassword(
   password: string,
   salt: Uint8Array,
-  iterations = PBKDF2_ITERATIONS,
+  iterations: number,
 ): Promise<string> {
   const key = await crypto.subtle.importKey('raw', ENC.encode(password), 'PBKDF2', false, ['deriveBits']);
   const bits = await crypto.subtle.deriveBits(

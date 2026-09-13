@@ -6,3 +6,6 @@ dist/
 .env
 .env.*
 !.env.example
+
+# generated credentials — never commit
+medbot-credentials.json

@@ -6,13 +6,18 @@
   "description": "A deterministic Telegram bot that nags you to take your medicines.",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler d1 migrations apply MEDBOT_DB --remote && wrangler deploy",
+    "deploy": "node scripts/medbot.mjs deploy",
     "migrate:local": "wrangler d1 migrations apply MEDBOT_DB --local",
     "migrate:remote": "wrangler d1 migrations apply MEDBOT_DB --remote",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "simulate": "vitest run test/scenarios/transcript.test.ts --reporter=basic"
+    "simulate": "vitest run test/scenarios/transcript.test.ts --reporter=basic",
+    "setup": "node scripts/medbot.mjs setup",
+    "status": "node scripts/medbot.mjs status",
+    "reset-password": "node scripts/medbot.mjs reset-password",
+    "calibrate": "node scripts/medbot.mjs calibrate",
+    "postinstall": "node -e \"console.log('\\\\n  medbot installed. Run: npm run setup\\\\n')\""
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260911.1",
@@ -20,5 +25,10 @@
     "typescript": "^7.0.2",
     "vitest": "^5.0.0",
     "wrangler": "^4.131.1"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/risenfromashes/medbot.git"
+  },
+  "license": "MIT"
 }

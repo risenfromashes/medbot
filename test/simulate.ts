@@ -61,6 +61,8 @@ export function makePatient(over: Partial<Patient> = {}): Patient {
     digestAt: '21:00',
     pausedUntil: null,
     nextActionAt: null,
+    lastDigestDay: null,
+    lastWatchdogAt: null,
     ...over,
   };
 }

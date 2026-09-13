@@ -75,6 +75,7 @@ export default {
           lastTick: hb === null ? null : new Date(hb.lastTickAt).toISOString(),
           lastTickAge: age === null ? null : fmtDuration(age),
           ticksToday: hb?.ticksToday ?? 0,
+          queued: await db.outboxDepth(),
         },
         { status: healthy ? 200 : 503 },
       );

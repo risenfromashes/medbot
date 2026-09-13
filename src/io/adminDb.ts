@@ -10,8 +10,8 @@
 
 import type { Dose, Medicine, Patient } from '../core/domain.js';
 import {
-  PBKDF2_ITERATIONS, SESSION_TTL_MS, b64, constantTimeEqual, generatePassword,
-  hashPassword, humanCode, randomBytes, randomToken, sha256Hex, unb64,
+  DEFAULT_ITERATIONS, SESSION_TTL_MS, b64, clampIterations, constantTimeEqual,
+  generatePassword, hashPassword, humanCode, randomBytes, randomToken, sha256Hex, unb64,
 } from './auth.js';
 
 type Row = Record<string, unknown>;
@@ -51,7 +51,32 @@ export interface RedeemResult {
 }
 
 export class AdminDb {
+  private iterationsCache: number | null = null;
+
   constructor(private readonly d1: D1Database) {}
+
+  /**
+   * The PBKDF2 work factor, read from the database rather than compiled in, so the deploy
+   * script can calibrate it to whatever this runtime can actually afford inside the CPU
+   * budget. Cached for the life of the request.
+   */
+  async iterations(): Promise<number> {
+    if (this.iterationsCache !== null) return this.iterationsCache;
+    const row = await this.d1.prepare("SELECT v FROM kv WHERE k = 'pbkdf2_iterations'").first<Row>();
+    const value = row === null ? DEFAULT_ITERATIONS : clampIterations(Number(row['v']));
+    this.iterationsCache = value;
+    return value;
+  }
+
+  async setIterations(n: number): Promise<number> {
+    const value = clampIterations(n);
+    await this.d1
+      .prepare("INSERT INTO kv (k, v) VALUES ('pbkdf2_iterations', ?1) ON CONFLICT (k) DO UPDATE SET v = ?1")
+      .bind(String(value))
+      .run();
+    this.iterationsCache = value;
+    return value;
+  }
 
   // --- the admin account ---------------------------------------------------
 
@@ -80,30 +105,32 @@ export class AdminDb {
    */
   async createAdmin(username: string, displayName: string, now: number): Promise<string> {
     const password = generatePassword();
+    const iterations = await this.iterations();
     const salt = randomBytes(16);
-    const hash = await hashPassword(password, salt);
+    const hash = await hashPassword(password, salt, iterations);
     await this.d1
       .prepare(
         `INSERT INTO admin_users (id, username, display_name, password_hash, password_salt,
            iterations, must_change, created_at)
          VALUES (1, ?1, ?2, ?3, ?4, ?5, 1, ?6)`,
       )
-      .bind(username, displayName, hash, b64(salt), PBKDF2_ITERATIONS, now)
+      .bind(username, displayName, hash, b64(salt), iterations, now)
       .run();
     return password;
   }
 
   async resetAdminPassword(now: number): Promise<string> {
     const password = generatePassword();
+    const iterations = await this.iterations();
     const salt = randomBytes(16);
-    const hash = await hashPassword(password, salt);
+    const hash = await hashPassword(password, salt, iterations);
     await this.d1.batch([
       this.d1
         .prepare(
           `UPDATE admin_users SET password_hash = ?1, password_salt = ?2, iterations = ?3,
              must_change = 1, password_changed_at = ?4 WHERE id = 1`,
         )
-        .bind(hash, b64(salt), PBKDF2_ITERATIONS, now),
+        .bind(hash, b64(salt), iterations, now),
       // Any session opened with the old password is no longer trustworthy.
       this.d1.prepare('DELETE FROM sessions'),
     ]);
@@ -123,15 +150,16 @@ export class AdminDb {
   }
 
   async setPassword(password: string, now: number, keepSession?: string): Promise<void> {
+    const iterations = await this.iterations();
     const salt = randomBytes(16);
-    const hash = await hashPassword(password, salt);
+    const hash = await hashPassword(password, salt, iterations);
     const stmts = [
       this.d1
         .prepare(
           `UPDATE admin_users SET password_hash = ?1, password_salt = ?2, iterations = ?3,
              must_change = 0, password_changed_at = ?4 WHERE id = 1`,
         )
-        .bind(hash, b64(salt), PBKDF2_ITERATIONS, now),
+        .bind(hash, b64(salt), iterations, now),
     ];
     // Changing a password logs out every other device, which is the point of doing it.
     stmts.push(
@@ -455,6 +483,8 @@ function rowToPatientLite(r: Row): Patient {
     digestAt: str(r['digest_at']),
     pausedUntil: numOrNull(r['paused_until']),
     nextActionAt: numOrNull(r['next_action_at']),
+    lastDigestDay: strOrNull(r['last_digest_day']),
+    lastWatchdogAt: numOrNull(r['last_watchdog_at']),
   };
 }
 

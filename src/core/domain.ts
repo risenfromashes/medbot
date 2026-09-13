@@ -222,6 +222,10 @@ export interface Patient {
   pausedUntil: number | null;
   /** Earliest instant the planner wants to be woken. The whole timer wheel, in one column. */
   nextActionAt: number | null;
+  /** Local day the daily digest was last sent, so it fires once whatever the tick cadence. */
+  lastDigestDay: LocalDay | null;
+  /** When the liveness watchdog last ran. */
+  lastWatchdogAt: number | null;
 }
 
 /**
@@ -344,6 +348,10 @@ export type Action =
   | { t: 'closePrompt'; promptId: number; state: PromptState; at: number }
   | { t: 'recordMeal'; meal: string; localDay: LocalDay; at: number; source: MealEvent['source'] }
   | { t: 'setNextAction'; at: number | null }
+  /** A message that needs no answer: digests, watchdog alerts, course completions. */
+  | { t: 'sendInfo'; text: string; tier: number; dedupe: string; priority?: number }
+  | { t: 'markDigestSent'; localDay: LocalDay }
+  | { t: 'markWatchdogRun'; at: number }
   | { t: 'note'; kind: string; detail: Record<string, unknown> };
 
 /** A small helper so the planner can mint placeholder ids without touching global state. */

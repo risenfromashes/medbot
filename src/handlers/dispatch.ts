@@ -92,27 +92,93 @@ function chatsExactly(state: PatientState, tier: number): Chat[] {
   return state.chats.filter((c) => c.active && c.escalationTier === tier);
 }
 
+/** Errors where trying again later is pointless. */
+function isPermanent(errorCode: number | undefined): boolean {
+  return errorCode === 403 || errorCode === 400;
+}
+
 async function sendTo(
   ctx: DispatchCtx,
   chats: Chat[],
   promptId: number,
   render: (forCaregiver: boolean) => Rendered,
+  priority = 100,
 ): Promise<void> {
   for (const chat of chats) {
-    if (ctx.tg.exhausted) return;
     const r = render(chat.role === 'caregiver');
-    const res = await ctx.tg.sendMessage(chat.chatId, r.text, {
-      ...(r.buttons.length > 0 ? { replyMarkup: { inline_keyboard: r.buttons } } : {}),
-    });
+    const markup = r.buttons.length > 0 ? { inline_keyboard: r.buttons } : undefined;
+
+    // Out of subrequest budget: queue it rather than drop it. The next tick picks it up,
+    // a minute later at worst.
+    if (ctx.tg.exhausted) {
+      await ctx.db.enqueue({
+        patientId: null, chatId: chat.chatId, method: 'sendMessage',
+        payload: { text: r.text, replyMarkup: markup },
+        priority, promptId, dedupeKey: `prompt:${promptId}:${chat.chatId}`,
+      }, ctx.now);
+      continue;
+    }
+
+    const res = await ctx.tg.sendMessage(chat.chatId, r.text, markup === undefined ? {} : { replyMarkup: markup });
     if (res.ok && res.result !== undefined) {
       await ctx.db.recordPromptMessage(promptId, chat.chatId, res.result.message_id, 'sent', ctx.now);
-    } else {
-      // 403 means the user blocked the bot. Left active, it would burn a subrequest every
-      // single tick forever.
-      if (res.errorCode === 403) await ctx.db.deactivateChat(chat.chatId, ctx.now);
-      await ctx.db.recordPromptMessage(promptId, chat.chatId, null, 'failed', ctx.now, res.error);
+      continue;
+    }
+
+    // 403 means the user blocked the bot. Left active it would burn a subrequest every
+    // tick forever, so stop trying.
+    if (res.errorCode === 403) await ctx.db.deactivateChat(chat.chatId, ctx.now);
+    await ctx.db.recordPromptMessage(promptId, chat.chatId, null, 'failed', ctx.now, res.error);
+
+    if (!isPermanent(res.errorCode)) {
+      await ctx.db.enqueue({
+        patientId: null, chatId: chat.chatId, method: 'sendMessage',
+        payload: { text: r.text, replyMarkup: markup },
+        priority, promptId, dedupeKey: `prompt:${promptId}:${chat.chatId}`,
+        notBefore: ctx.now + (res.retryAfter !== undefined ? res.retryAfter * 1000 : 30_000),
+      }, ctx.now);
     }
   }
+}
+
+/**
+ * Drain the queue, most important first.
+ *
+ * A reserve is held back for high-priority items so a backlog of digests and
+ * confirmations can never stand between a patient and a medicine reminder.
+ */
+export async function flushOutbox(ctx: DispatchCtx, maxSends: number): Promise<number> {
+  const items = await ctx.db.dueOutbox(ctx.now, maxSends);
+  let sent = 0;
+  for (const item of items) {
+    if (ctx.tg.exhausted) break;
+    // Leave room for anything critical that this tick still needs to send.
+    if (item.priority > 50 && ctx.tg.callsUsed > maxSends * 0.8) break;
+
+    const payload = item.payload as { text?: string; replyMarkup?: { inline_keyboard: unknown[] } };
+    const res = await ctx.tg.sendMessage(item.chatId, payload.text ?? '', {
+      ...(payload.replyMarkup !== undefined
+        ? { replyMarkup: payload.replyMarkup as { inline_keyboard: never[] } }
+        : {}),
+    });
+
+    if (res.ok) {
+      await ctx.db.settleOutbox(item.id, 'sent', ctx.now);
+      if (item.promptId !== null && res.result !== undefined) {
+        await ctx.db.recordPromptMessage(item.promptId, item.chatId, res.result.message_id, 'sent', ctx.now);
+      }
+      sent++;
+    } else if (isPermanent(res.errorCode)) {
+      if (res.errorCode === 403) await ctx.db.deactivateChat(item.chatId, ctx.now);
+      await ctx.db.settleOutbox(item.id, 'dropped', ctx.now, { error: res.error ?? '' });
+    } else {
+      await ctx.db.settleOutbox(item.id, 'retry', ctx.now, {
+        error: res.error ?? '',
+        retryAfterMs: res.retryAfter !== undefined ? res.retryAfter * 1000 : 60_000 * 2 ** item.attempts,
+      });
+    }
+  }
+  return sent;
 }
 
 export async function dispatch(
@@ -143,8 +209,9 @@ export async function dispatch(
       const involved = prompt.body.doseIds
         .map((id) => doses.get(id))
         .filter((d): d is Dose => d !== undefined);
+      const critical = involved.some((d) => meds.get(d.medId)?.critical === true);
       await sendTo(ctx, chatsAtOrBelow(state, a.tier), promptId, (care) =>
-        renderFor(prompt, involved, meds, state, ctx.z, ctx.now, care),
+        renderFor(prompt, involved, meds, state, ctx.z, ctx.now, care), critical ? 0 : 100,
       );
       continue;
     }
@@ -169,6 +236,32 @@ export async function dispatch(
       await sendTo(ctx, chatsAtOrBelow(state, prompt.escalatedTier), promptId, (care) =>
         renderFor(bumped, involved, meds, state, ctx.z, ctx.now, care),
       );
+      continue;
+    }
+
+    if (a.t === 'sendInfo') {
+      // No prompt row and no buttons: nothing here expects an answer.
+      for (const chat of chatsAtOrBelow(state, a.tier)) {
+        const quiet = (a.priority ?? 100) >= 150;
+        if (ctx.tg.exhausted) {
+          await ctx.db.enqueue({
+            patientId: state.patient.id, chatId: chat.chatId, method: 'sendMessage',
+            payload: { text: a.text }, priority: a.priority ?? 100,
+            dedupeKey: `${a.dedupe}:${chat.chatId}`,
+          }, ctx.now);
+          continue;
+        }
+        const res = await ctx.tg.sendMessage(chat.chatId, a.text, { disableNotification: quiet });
+        if (!res.ok && res.errorCode === 403) await ctx.db.deactivateChat(chat.chatId, ctx.now);
+        else if (!res.ok && !isPermanent(res.errorCode)) {
+          await ctx.db.enqueue({
+            patientId: state.patient.id, chatId: chat.chatId, method: 'sendMessage',
+            payload: { text: a.text }, priority: a.priority ?? 100,
+            dedupeKey: `${a.dedupe}:${chat.chatId}`,
+            notBefore: ctx.now + 60_000,
+          }, ctx.now);
+        }
+      }
       continue;
     }
 

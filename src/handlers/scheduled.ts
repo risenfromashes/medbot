@@ -11,18 +11,21 @@ import { plan } from '../core/plan.js';
 import { zoneFor } from '../core/tz.js';
 import { Db } from '../io/db.js';
 import { Telegram } from '../io/telegram.js';
-import { dispatch, clearPromptMessages } from './dispatch.js';
+import { dispatch, clearPromptMessages, flushOutbox } from './dispatch.js';
 import type { Env } from '../types.js';
 import { COMMANDS } from './commands.js';
 
 /** Subrequest budget. The platform allows 50; leave headroom for bookkeeping. */
 const MAX_TELEGRAM_CALLS = 40;
 
-export async function runTick(env: Env, now: number): Promise<{ patients: number; calls: number }> {
+export async function runTick(env: Env, now: number): Promise<{ patients: number; calls: number; flushed: number }> {
   const db = new Db(env.MEDBOT_DB);
   const tg = new Telegram(env.TELEGRAM_BOT_TOKEN, MAX_TELEGRAM_CALLS);
 
   await ensureWebhook(env, db, tg, now);
+
+  // Anything queued by an earlier tick goes first: it is already late.
+  const flushed = await flushOutbox({ db, tg, z: zoneFor('UTC'), now }, MAX_TELEGRAM_CALLS);
 
   const ids = await db.patientsNeedingAttention(now);
   let handled = 0;
@@ -58,13 +61,14 @@ export async function runTick(env: Env, now: number): Promise<{ patients: number
 
   await db.heartbeat(now, new Date(now).toISOString().slice(0, 10));
 
-  // Housekeeping: keep the dedupe table from growing without bound. Cheap, and only once
-  // an hour rather than every tick.
+  // Housekeeping: keep the dedupe and outbox tables from growing without bound. Cheap,
+  // and only once an hour rather than every tick.
   if (new Date(now).getUTCMinutes() === 7) {
     await db.gcUpdates(now - 24 * 3600_000);
+    await db.gcOutbox(now - 3 * 24 * 3600_000);
   }
 
-  return { patients: handled, calls: tg.callsUsed };
+  return { patients: handled, calls: tg.callsUsed, flushed };
 }
 
 /**

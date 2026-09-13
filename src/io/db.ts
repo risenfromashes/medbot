@@ -363,6 +363,24 @@ export class Db {
           rest.push(this.d1.prepare('UPDATE patients SET next_action_at = ?2 WHERE id = ?1').bind(pid, a.at));
           break;
 
+        case 'markDigestSent':
+          rest.push(this.d1.prepare('UPDATE patients SET last_digest_day = ?2 WHERE id = ?1').bind(pid, a.localDay));
+          break;
+
+        case 'markWatchdogRun':
+          rest.push(this.d1.prepare('UPDATE patients SET last_watchdog_at = ?2 WHERE id = ?1').bind(pid, a.at));
+          break;
+
+        case 'sendInfo':
+          // Dispatched separately; recorded here so the digest and any watchdog alert
+          // appear in the medical record alongside everything else.
+          rest.push(
+            this.d1
+              .prepare('INSERT INTO audit_log (patient_id, at, kind, actor, detail_json) VALUES (?1,?2,?3,?4,?5)')
+              .bind(pid, now, 'info_sent', 'system', JSON.stringify({ dedupe: a.dedupe })),
+          );
+          break;
+
         case 'note':
           rest.push(
             this.d1
@@ -620,6 +638,84 @@ export class Db {
     return row === null ? null : rowToMed(row);
   }
 
+  /**
+   * Change one medicine's configuration in place.
+   *
+   * Any change to *when* it is due invalidates the dose already scheduled under the old
+   * rule, so the live dose is cancelled and the next tick rebuilds it. Course progress and
+   * history are untouched -- editing a dose text should not restart a seven-day course.
+   */
+  async updateMed(
+    medId: number,
+    patch: Partial<Pick<Medicine, 'name' | 'doseText' | 'notes' | 'intervalMs' | 'minGapMs' | 'maxPerDay' | 'critical' | 'awakeOnly' | 'stepSpacingMs' | 'courseDays' | 'courseKind' | 'driftPolicy'>> & { spec?: Medicine['spec'] },
+    opts: { rescheduleNow: boolean },
+    now: number,
+  ): Promise<void> {
+    const sets: string[] = [];
+    const binds: unknown[] = [];
+    const put = (col: string, value: unknown): void => {
+      binds.push(value);
+      sets.push(`${col} = ?${binds.length + 1}`);
+    };
+
+    if (patch.name !== undefined) put('name', patch.name);
+    if (patch.doseText !== undefined) put('dose_text', patch.doseText);
+    if (patch.notes !== undefined) put('notes', patch.notes);
+    if (patch.intervalMs !== undefined) put('interval_ms', patch.intervalMs);
+    if (patch.minGapMs !== undefined) put('min_gap_ms', patch.minGapMs);
+    if (patch.maxPerDay !== undefined) put('max_per_day', patch.maxPerDay);
+    if (patch.critical !== undefined) put('critical', patch.critical ? 1 : 0);
+    if (patch.awakeOnly !== undefined) put('awake_only', patch.awakeOnly ? 1 : 0);
+    if (patch.stepSpacingMs !== undefined) put('step_spacing_ms', patch.stepSpacingMs);
+    if (patch.courseDays !== undefined) put('course_days', patch.courseDays);
+    if (patch.courseKind !== undefined) put('course_kind', patch.courseKind);
+    if (patch.driftPolicy !== undefined) put('drift_policy', patch.driftPolicy);
+    if (patch.spec !== undefined) {
+      put('spec_json', JSON.stringify(patch.spec));
+      put('kind', patch.spec.kind);
+    }
+    if (sets.length === 0) return;
+
+    const stmts: D1PreparedStatement[] = [
+      this.d1.prepare(`UPDATE medications SET ${sets.join(', ')} WHERE id = ?1`).bind(medId, ...binds),
+    ];
+    if (opts.rescheduleNow) {
+      stmts.push(
+        this.d1
+          .prepare(
+            `UPDATE doses SET status = 'cancelled', resolved_at = ?2, resolution_src = 'import'
+             WHERE med_id = ?1 AND status IN ('scheduled','deferred','due','prompted')`,
+          )
+          .bind(medId, now),
+      );
+    }
+    await this.d1.batch(stmts);
+  }
+
+  /** Insert medicines into an existing prescription without disturbing the others. */
+  async addMedicines(patientId: number, meds: NormalizedPrescription['meds'], now: number): Promise<void> {
+    if (meds.length === 0) return;
+    await this.d1.batch(
+      meds.map((m) =>
+        this.d1
+          .prepare(
+            `INSERT INTO medications (patient_id, med_key, name, dose_text, notes, kind, spec_json, spec_hash,
+               steps_json, step_spacing_ms, interval_ms, min_gap_ms, onset_offset_ms, max_per_day,
+               awake_only, critical, drift_policy, drift_tolerance_ms, catchup_grace_ms, nag_policy_json,
+               mergeable, course_kind, course_days, course_doses, course_until, status, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,'active',?26)`,
+          )
+          .bind(
+            patientId, m.medKey, m.name, m.doseText, m.notes, m.kind, JSON.stringify(m.spec), m.specHash,
+            JSON.stringify(m.steps), m.stepSpacingMs, m.intervalMs, m.minGapMs, m.onsetOffsetMs, m.maxPerDay,
+            m.awakeOnly ? 1 : 0, m.critical ? 1 : 0, m.driftPolicy, m.driftToleranceMs, m.catchupGraceMs,
+            JSON.stringify(m.nagPolicy), m.mergeable ? 1 : 0, m.courseKind, m.courseDays, m.courseDoses,
+            m.courseUntil, now,
+          ),
+      ),
+    );
+  }
+
   async setMedStatus(medId: number, status: Medicine['status'], now: number): Promise<void> {
     await this.d1.batch([
       this.d1.prepare('UPDATE medications SET status = ?2 WHERE id = ?1').bind(medId, status),
@@ -703,6 +799,19 @@ export class Db {
       )
       .bind(patientId, meal, localDay, at, source)
       .run();
+  }
+
+  async mealDefsFor(patientId: number): Promise<MealDef[]> {
+    const res = await this.d1.prepare('SELECT * FROM meal_defs WHERE patient_id = ?1').bind(patientId).all<Row>();
+    return (res.results ?? []).map(rowToMealDef);
+  }
+
+  async mealEventsFor(patientId: number, localDay: string): Promise<MealEvent[]> {
+    const res = await this.d1
+      .prepare('SELECT * FROM meal_events WHERE patient_id = ?1 AND local_day = ?2')
+      .bind(patientId, localDay)
+      .all<Row>();
+    return (res.results ?? []).map(rowToMealEvent);
   }
 
   async setWake(
@@ -898,6 +1007,98 @@ export class Db {
     return row === null ? null : str(row['raw_json']);
   }
 
+  // --- the outbound queue ---------------------------------------------------
+
+  /**
+   * Queue a message rather than dropping it.
+   *
+   * A Worker invocation gets 50 subrequests and Telegram rate-limits per chat, so a busy
+   * tick can genuinely run out of room mid-fan-out. Without this, that reminder is simply
+   * lost -- and a lost reminder is the failure mode this whole system exists to avoid.
+   */
+  async enqueue(
+    item: {
+      patientId: number | null;
+      chatId: number;
+      method: string;
+      payload: unknown;
+      priority?: number;
+      promptId?: number | null;
+      dedupeKey?: string | null;
+      notBefore?: number;
+    },
+    now: number,
+  ): Promise<void> {
+    await this.d1
+      .prepare(
+        `INSERT OR IGNORE INTO outbox (patient_id, chat_id, method, payload_json, prompt_id,
+           priority, not_before, dedupe_key, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)`,
+      )
+      .bind(
+        item.patientId, item.chatId, item.method, JSON.stringify(item.payload),
+        item.promptId ?? null, item.priority ?? 100, item.notBefore ?? now,
+        item.dedupeKey ?? null, now,
+      )
+      .run();
+  }
+
+  async dueOutbox(now: number, limit: number): Promise<Array<{
+    id: number; chatId: number; method: string; payload: Record<string, unknown>;
+    promptId: number | null; attempts: number; priority: number;
+  }>> {
+    const res = await this.d1
+      .prepare(
+        `SELECT * FROM outbox WHERE state = 'queued' AND not_before <= ?1
+         ORDER BY priority, id LIMIT ?2`,
+      )
+      .bind(now, limit)
+      .all<Row>();
+    return (res.results ?? []).map((r) => ({
+      id: num(r['id']),
+      chatId: num(r['chat_id']),
+      method: str(r['method']),
+      payload: json(r['payload_json'], {} as Record<string, unknown>),
+      promptId: numOrNull(r['prompt_id']),
+      attempts: num(r['attempts']),
+      priority: num(r['priority']),
+    }));
+  }
+
+  async settleOutbox(
+    id: number,
+    outcome: 'sent' | 'retry' | 'dropped',
+    now: number,
+    opts: { error?: string; retryAfterMs?: number } = {},
+  ): Promise<void> {
+    if (outcome === 'retry') {
+      // Exponential backoff, honouring a 429's retry_after when Telegram gave one.
+      await this.d1
+        .prepare(
+          `UPDATE outbox SET attempts = attempts + 1, last_error = ?2,
+             not_before = ?3,
+             state = CASE WHEN attempts + 1 >= 8 THEN 'failed' ELSE 'queued' END
+           WHERE id = ?1`,
+        )
+        .bind(id, opts.error ?? null, now + (opts.retryAfterMs ?? 60_000))
+        .run();
+      return;
+    }
+    await this.d1
+      .prepare('UPDATE outbox SET state = ?2, last_error = ?3 WHERE id = ?1')
+      .bind(id, outcome === 'sent' ? 'sent' : 'dropped', opts.error ?? null)
+      .run();
+  }
+
+  async gcOutbox(before: number): Promise<void> {
+    await this.d1.prepare("DELETE FROM outbox WHERE state != 'queued' AND created_at < ?1").bind(before).run();
+  }
+
+  async outboxDepth(): Promise<number> {
+    const row = await this.d1.prepare("SELECT COUNT(*) AS n FROM outbox WHERE state = 'queued'").first<Row>();
+    return row === null ? 0 : num(row['n']);
+  }
+
   // --- misc ---------------------------------------------------------------
 
   /** Insert-first dedupe: Telegram redelivers updates, and a repeated "taken" double-counts. */
@@ -993,6 +1194,8 @@ function rowToPatient(r: Row): Patient {
     digestAt: str(r['digest_at']),
     pausedUntil: numOrNull(r['paused_until']),
     nextActionAt: numOrNull(r['next_action_at']),
+    lastDigestDay: strOrNull(r['last_digest_day']),
+    lastWatchdogAt: numOrNull(r['last_watchdog_at']),
   };
 }
 

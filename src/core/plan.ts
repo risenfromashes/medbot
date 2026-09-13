@@ -14,6 +14,7 @@ import type { Action, Dose, Medicine, PatientState, Prompt, PromptBody } from '.
 import { tempIds } from './domain.js';
 import { planMeals } from './planMeals.js';
 import { planWake } from './planWake.js';
+import { planReports } from './planReport.js';
 import { courseComplete, nextDue, reviveAtWake, rollForwardAfter } from './planSchedule.js';
 import { advanceMedicine } from './advance.js';
 import type { DayFacts } from './planSchedule.js';
@@ -87,6 +88,10 @@ export function plan(state: PatientState, now: number, z: Zone): Action[] {
   );
   push(mealFacts.wakeAt);
 
+  // --- 2b. digest and watchdog -------------------------------------------
+  const reports = planReports(state, now, z, today, emit);
+  push(reports.wakeAt);
+
   const facts: DayFacts = {
     wakeAnchor: wake.wakeAnchor,
     awake: wake.state === 'awake',
@@ -139,6 +144,17 @@ export function plan(state: PatientState, now: number, z: Zone): Action[] {
     if (live === null) {
       if (courseComplete(med, now, z, today)) {
         emit({ t: 'completeMed', medId: med.id, reason: 'course_complete' });
+        emit({
+          t: 'sendInfo',
+          tier: 0,
+          priority: 150,
+          dedupe: `course:${med.id}`,
+          text:
+            `🎉 <b>${med.name} — course finished.</b>\n\n` +
+            `${med.dosesTaken} dose${med.dosesTaken === 1 ? '' : 's'} taken` +
+            `${med.dosesMissed > 0 ? `, ${med.dosesMissed} missed` : ' — every single one'}.\n\n` +
+            `I'll stop reminding you about this one. Use /import if the doctor extends it.`,
+        });
         continue;
       }
 

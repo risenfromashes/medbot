@@ -8,11 +8,12 @@
 
 import type { Medicine, Patient } from '../core/domain.js';
 import { describeCourse, describeSchedule, hashString, parsePrescription } from '../core/prescription.js';
+import { PRESCRIPTION_PROMPT_PARTS } from '../core/promptText.js';
 import type { NormalizedPrescription } from '../core/prescription.js';
 import { renderConfirmation } from '../core/render.js';
 import { resolveRetro } from '../core/retro.js';
 import { parseDuration, parseTime, splitTrailingTime } from '../core/timeparse.js';
-import { MINUTE, fmtDuration, isValidTimeZone, zoneFor } from '../core/tz.js';
+import { HOUR, MINUTE, fmtDuration, isValidTimeZone, parseWall, zoneFor } from '../core/tz.js';
 import type { Zone } from '../core/tz.js';
 import { Db } from '../io/db.js';
 import { AdminDb } from '../io/adminDb.js';
@@ -32,6 +33,9 @@ export const COMMANDS = [
   { command: 'snooze', description: 'Push a reminder back, e.g. /snooze antibiotic drop 15m' },
   { command: 'undo', description: 'Reverse the last thing you logged' },
   { command: 'import', description: 'Load a prescription (paste or attach the JSON)' },
+  { command: 'prompt', description: 'Get the prompt for turning a prescription photo into JSON' },
+  { command: 'edit', description: 'Change a medicine, e.g. /edit antibiotic drop every 3h' },
+  { command: 'extend', description: 'Add days to a course, e.g. /extend antibiotic drop 3d' },
   { command: 'export', description: 'Get the current prescription back as JSON' },
   { command: 'log', description: 'Recent adherence' },
   { command: 'pause', description: 'Pause a medicine' },
@@ -106,6 +110,10 @@ export async function handleCommand(ctx: CmdCtx, msg: TgIncomingMessage): Promis
     case 'status': return cmdStatus(ctx);
     case 'meds': case 'medicines': return cmdMeds(ctx);
     case 'import': return cmdImport(ctx, args, msg);
+    case 'prompt': case 'template': case 'json': return cmdPrompt(ctx);
+    case 'edit': case 'set': return cmdEdit(ctx, args);
+    case 'extend': return cmdExtend(ctx, args);
+    case 'add': case 'new': return cmdAdd(ctx, args);
     case 'export': case 'prescription': return cmdExport(ctx);
     case 'log': case 'adherence': return cmdLog(ctx, args);
     case 'pause': return cmdMedStatus(ctx, args, 'paused');
@@ -513,39 +521,80 @@ async function cmdStatus(ctx: CmdCtx): Promise<void> {
   if (ap === null) return needsSetup(ctx);
   const { patient, z } = ap;
   const meds = await ctx.db.medsFor(patient.id);
+  const today = z.localDay(ctx.now);
 
   const lines: string[] = [
-    `<b>${esc(patient.displayName)}</b> — ${z.fmtTime12(ctx.now)} (${esc(patient.tz)})`,
+    `<b>${esc(patient.displayName)}</b> · ${z.fmtTime12(ctx.now)}`,
     patient.wakeState === 'awake'
-      ? `☀️ Awake since ${patient.lastWakeAt !== null ? z.fmtTime12(patient.lastWakeAt) : '?'}${patient.wakeConfidence !== 'confirmed' ? ` <i>(${patient.wakeConfidence})</i>` : ''}`
+      ? `☀️ Awake${patient.lastWakeAt !== null ? ` since ${z.fmtTime12(patient.lastWakeAt)}` : ''}` +
+        (patient.wakeConfidence === 'confirmed' ? '' : ` <i>(${patient.wakeConfidence})</i>`)
       : `🌙 Asleep${patient.lastSleepAt !== null ? ` since ${z.fmtTime12(patient.lastSleepAt)}` : ''}`,
-    '',
   ];
 
   if (meds.length === 0) {
-    lines.push('No medicines yet — send me a prescription with /import.');
+    lines.push('', 'No medicines yet — send /import, or /prompt to get the format.');
     await reply(ctx, lines.join('\n'));
     return;
   }
 
   const pending: string[] = [];
-  const upcoming: string[] = [];
+  const upcoming: Array<{ at: number; text: string }> = [];
+
   for (const med of meds) {
     const live = await ctx.db.liveDoseFor(med.id);
     if (live === null) continue;
-    const label = med.steps.length > 1 ? `${med.steps[live.step]?.name ?? med.name} (${live.step + 1}/${med.steps.length})` : med.name;
+    const step = med.steps[live.step];
+    const label = med.steps.length > 1
+      ? `${step?.name ?? med.name} (${live.step + 1}/${med.steps.length})`
+      : med.name;
+    const dose = step?.dose ?? med.doseText;
+    const withDose = dose === null || dose === undefined ? '' : ` — ${esc(dose)}`;
+
     if (live.status === 'due' || live.status === 'prompted') {
-      pending.push(`• <b>${esc(label)}</b> — due ${z.fmtTime12(live.effectiveDueAt)}, ${fmtDuration(ctx.now - live.effectiveDueAt)} ago`);
+      pending.push(`• <b>${esc(label)}</b>${withDose}\n  <i>due ${z.fmtTime12(live.effectiveDueAt)}, ${fmtDuration(ctx.now - live.effectiveDueAt)} ago</i>`);
     } else if (live.status === 'deferred') {
-      upcoming.push(`• ${esc(label)} — waiting until you're up`);
+      upcoming.push({ at: Number.MAX_SAFE_INTEGER, text: `• ${esc(label)} — <i>waiting until you're up</i>` });
     } else {
-      upcoming.push(`• ${esc(label)} — ${z.fmtTime12(live.effectiveDueAt)} (in ${fmtDuration(live.effectiveDueAt - ctx.now)})`);
+      upcoming.push({
+        at: live.effectiveDueAt,
+        text: `• ${esc(label)} — ${z.fmtTime12(live.effectiveDueAt)} <i>(in ${fmtDuration(live.effectiveDueAt - ctx.now)})</i>`,
+      });
     }
   }
 
-  if (pending.length > 0) lines.push('<b>Waiting on you</b>', ...pending, '');
-  if (upcoming.length > 0) lines.push('<b>Coming up</b>', ...upcoming);
-  if (pending.length === 0 && upcoming.length === 0) lines.push('Nothing scheduled right now.');
+  if (pending.length > 0) lines.push('', '<b>Waiting on you</b>', ...pending);
+  if (upcoming.length > 0) {
+    upcoming.sort((a, b) => a.at - b.at);
+    lines.push('', '<b>Coming up</b>', ...upcoming.slice(0, 6).map((u) => u.text));
+  }
+  if (pending.length === 0 && upcoming.length === 0) lines.push('', 'Nothing scheduled right now.');
+
+  // Today so far, from the same counters the digest uses.
+  const rows = await ctx.db.adherence(patient.id, today);
+  let taken = 0;
+  let missed = 0;
+  for (const r of rows) {
+    if (r.status === 'taken') taken += r.n;
+    if (r.status === 'missed') missed += r.n;
+  }
+  if (taken > 0 || missed > 0) {
+    lines.push('', `<b>Today</b> — ${taken} taken${missed > 0 ? `, ${missed} missed` : ''}`);
+  }
+
+  // Meals matter only if something actually depends on them.
+  const mealDeps = meds.filter((m) => m.kind === 'meal');
+  if (mealDeps.length > 0) {
+    const defs = await ctx.db.mealDefsFor(patient.id);
+    const events = await ctx.db.mealEventsFor(patient.id, today);
+    const mealLine = defs
+      .map((d) => {
+        const e = events.find((x) => x.meal === d.meal);
+        const mark = e === undefined ? '·' : e.source === 'skipped' ? '⏭' : '✅';
+        return `${mark} ${d.meal}`;
+      })
+      .join('  ');
+    if (mealLine !== '') lines.push('', `<b>Meals</b>  ${mealLine}`);
+  }
 
   await reply(ctx, lines.join('\n'));
 }
@@ -787,6 +836,309 @@ async function cmdExport(ctx: CmdCtx): Promise<void> {
   await reply(ctx, `<pre><code>${esc(body)}</code></pre>`);
 }
 
+/** Hand over the prescription-conversion prompt, in chunks Telegram will accept. */
+async function cmdPrompt(ctx: CmdCtx): Promise<void> {
+  for (const part of PRESCRIPTION_PROMPT_PARTS) {
+    await reply(ctx, part);
+  }
+}
+
+/**
+ * Change one medicine without touching the code or re-importing the whole prescription.
+ *
+ * A deliberately small grammar -- `/edit <medicine> <field> <value>` -- because the
+ * alternative is either a menu tree nobody can navigate on a phone or natural language,
+ * which would mean guessing, and guessing about a dose schedule is not acceptable.
+ */
+async function cmdEdit(ctx: CmdCtx, args: string): Promise<void> {
+  const ap = await activePatient(ctx);
+  if (ap === null) return needsSetup(ctx);
+
+  const usage =
+    '<b>Changing a medicine</b>\n' +
+    '<code>/edit antibiotic drop every 3h</code> — dosing interval\n' +
+    '<code>/edit antibiotic drop times 08:00,20:00</code> — fixed clock times\n' +
+    '<code>/edit antibiotic drop dose 2 drops</code> — what to take\n' +
+    '<code>/edit antibiotic drop name antibiotic drop</code>\n' +
+    '<code>/edit antibiotic drop mingap 90m</code> — minimum safe gap\n' +
+    '<code>/edit antibiotic drop spacing 15m</code> — gap between drops in a group\n' +
+    '<code>/edit antibiotic drop maxperday 4</code>\n' +
+    '<code>/edit antibiotic drop critical on</code> — may wake you at night\n' +
+    '<code>/edit antibiotic drop note Shake well</code>\n\n' +
+    'To change more than one thing, /import the whole prescription again.';
+
+  const meds = await ctx.db.medsFor(ap.patient.id, true);
+  const parts = args.trim().split(/\s+/).filter((x) => x !== '');
+  if (parts.length < 2) {
+    await reply(ctx, usage);
+    return;
+  }
+
+  // The medicine name may itself be several words, so find the longest prefix that
+  // resolves to exactly one medicine and treat the rest as field + value.
+  let med = null;
+  let rest: string[] = [];
+  for (let take = Math.min(4, parts.length - 2); take >= 1; take--) {
+    const candidates = matchMed(meds, parts.slice(0, take).join(' '));
+    if (candidates.length === 1) {
+      med = candidates[0]!;
+      rest = parts.slice(take);
+      break;
+    }
+  }
+  if (med === null) {
+    await reply(ctx, `No medicine matching "${esc(parts[0] ?? '')}". /meds lists them.`);
+    return;
+  }
+
+  const field = (rest[0] ?? '').toLowerCase();
+  const value = rest.slice(1).join(' ').trim();
+  if (value === '') {
+    await reply(ctx, usage);
+    return;
+  }
+
+  let summary: string;
+  let reschedule = true;
+
+  switch (field) {
+    case 'every':
+    case 'interval': {
+      const ms = parseDuration(value);
+      if (ms === null || ms < 5 * MINUTE) {
+        await reply(ctx, `I couldn't read "${esc(value)}" as an interval. Try <code>3h</code> or <code>90m</code>.`);
+        return;
+      }
+      // Keep the safety floor sensible relative to the new interval unless it was set
+      // explicitly tighter -- a looser interval with an old, tiny min gap is a trap.
+      const minGap = Math.min(med.minGapMs, Math.floor(ms * 0.75));
+      await ctx.db.updateMed(med.id, {
+        intervalMs: ms, minGapMs: minGap,
+        spec: { ...med.spec, kind: 'interval', intervalMs: ms },
+      }, { rescheduleNow: true }, ctx.now);
+      summary = `now every ${fmtDuration(ms)}`;
+      break;
+    }
+
+    case 'times': {
+      const times: string[] = [];
+      for (const t of value.split(/[, ]+/).filter((x) => x !== '')) {
+        try {
+          const { h, mi } = parseWall(t);
+          times.push(`${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}`);
+        } catch {
+          await reply(ctx, `"${esc(t)}" is not a time like <code>08:00</code>.`);
+          return;
+        }
+      }
+      if (times.length === 0) {
+        await reply(ctx, 'Give me at least one time, e.g. <code>/edit antibiotic drop times 08:00,20:00</code>');
+        return;
+      }
+      times.sort();
+      await ctx.db.updateMed(med.id, {
+        intervalMs: null as unknown as number,
+        spec: { kind: 'fixed_times', times },
+      }, { rescheduleNow: true }, ctx.now);
+      summary = `now at ${times.join(', ')}`;
+      break;
+    }
+
+    case 'dose':
+      await ctx.db.updateMed(med.id, { doseText: value }, { rescheduleNow: false }, ctx.now);
+      summary = `dose is now "${value}"`;
+      reschedule = false;
+      break;
+
+    case 'name':
+      await ctx.db.updateMed(med.id, { name: value }, { rescheduleNow: false }, ctx.now);
+      summary = `renamed to "${value}"`;
+      reschedule = false;
+      break;
+
+    case 'note':
+    case 'notes':
+      await ctx.db.updateMed(med.id, { notes: value }, { rescheduleNow: false }, ctx.now);
+      summary = `note set`;
+      reschedule = false;
+      break;
+
+    case 'mingap':
+    case 'min_gap': {
+      const ms = parseDuration(value);
+      if (ms === null) {
+        await reply(ctx, `I couldn't read "${esc(value)}" as a duration.`);
+        return;
+      }
+      await ctx.db.updateMed(med.id, { minGapMs: ms }, { rescheduleNow: true }, ctx.now);
+      summary = `minimum gap is now ${fmtDuration(ms)}`;
+      break;
+    }
+
+    case 'spacing': {
+      const ms = parseDuration(value);
+      if (ms === null) {
+        await reply(ctx, `I couldn't read "${esc(value)}" as a duration.`);
+        return;
+      }
+      if (med.steps.length < 2) {
+        await reply(ctx, `${esc(med.name)} is a single medicine, not a spaced group — spacing does not apply.`);
+        return;
+      }
+      await ctx.db.updateMed(med.id, { stepSpacingMs: ms }, { rescheduleNow: true }, ctx.now);
+      summary = `now ${fmtDuration(ms)} between each one`;
+      break;
+    }
+
+    case 'maxperday':
+    case 'max_per_day': {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1 || n > 24) {
+        await reply(ctx, 'Give a whole number between 1 and 24.');
+        return;
+      }
+      await ctx.db.updateMed(med.id, { maxPerDay: n }, { rescheduleNow: true }, ctx.now);
+      summary = `at most ${n} a day`;
+      break;
+    }
+
+    case 'critical': {
+      const on = /^(on|yes|true|1)$/i.test(value);
+      // A critical medicine must be allowed to pierce sleep, or the flag means nothing.
+      await ctx.db.updateMed(med.id, { critical: on, awakeOnly: !on }, { rescheduleNow: true }, ctx.now);
+      summary = on ? 'will now be reminded even at night' : 'will only be reminded while awake';
+      break;
+    }
+
+    case 'drift': {
+      if (!['absorb', 'strict_actual', 'strict_grid'].includes(value)) {
+        await reply(ctx, 'Use <code>absorb</code>, <code>strict_actual</code> or <code>strict_grid</code>.');
+        return;
+      }
+      await ctx.db.updateMed(med.id, { driftPolicy: value as 'absorb' }, { rescheduleNow: true }, ctx.now);
+      summary = `drift policy is now ${value}`;
+      break;
+    }
+
+    default:
+      await reply(ctx, usage);
+      return;
+  }
+
+  await ctx.db.audit(ap.patient.id, 'med_edited', String(ctx.chatId), { medId: med.id, field, value }, ctx.now);
+  await ctx.db.wakeNow(ap.patient.id, ctx.now);
+  await reply(
+    ctx,
+    `✏️ <b>${esc(med.name)}</b> — ${esc(summary)}.` +
+      (reschedule ? '\n<i>The next dose has been recalculated.</i>' : ''),
+  );
+}
+
+async function cmdExtend(ctx: CmdCtx, args: string): Promise<void> {
+  const ap = await activePatient(ctx);
+  if (ap === null) return needsSetup(ctx);
+
+  const parts = args.trim().split(/\s+/).filter((x) => x !== '');
+  if (parts.length < 2) {
+    await reply(ctx, 'How much longer? e.g. <code>/extend antibiotic drop 3d</code>');
+    return;
+  }
+  const meds = await ctx.db.medsFor(ap.patient.id, true);
+  const matches = matchMed(meds, parts.slice(0, -1).join(' '));
+  if (matches.length !== 1) {
+    await reply(ctx, matches.length === 0 ? `No medicine matching "${esc(parts[0] ?? '')}".` : 'Which one? /meds lists them.');
+    return;
+  }
+  const med = matches[0]!;
+  const extra = parseDuration(parts[parts.length - 1]!);
+  if (extra === null) {
+    await reply(ctx, `I couldn't read "${esc(parts[parts.length - 1] ?? '')}" — try <code>3d</code> or <code>48h</code>.`);
+    return;
+  }
+  const extraDays = Math.max(1, Math.round(extra / (24 * HOUR)));
+
+  if (med.courseKind !== 'days') {
+    // Turning an open-ended medicine into a fixed course from today is a different
+    // decision, so say so rather than quietly inventing a start date.
+    await ctx.db.updateMed(med.id, { courseKind: 'days', courseDays: extraDays }, { rescheduleNow: false }, ctx.now);
+    await reply(ctx, `⏳ <b>${esc(med.name)}</b> — now set to run ${extraDays} more day${extraDays === 1 ? '' : 's'} from when it started.`);
+  } else {
+    const total = (med.courseDays ?? 0) + extraDays;
+    await ctx.db.updateMed(med.id, { courseDays: total }, { rescheduleNow: false }, ctx.now);
+    await reply(ctx, `⏳ <b>${esc(med.name)}</b> — course extended to ${total} days (was ${med.courseDays}).`);
+  }
+
+  if (med.status === 'completed') {
+    await ctx.db.setMedStatus(med.id, 'active', ctx.now);
+    await reply(ctx, 'It had already finished, so I have restarted it.');
+  }
+  await ctx.db.audit(ap.patient.id, 'course_extended', String(ctx.chatId), { medId: med.id, extraDays }, ctx.now);
+  await ctx.db.wakeNow(ap.patient.id, ctx.now);
+}
+
+/**
+ * Add one medicine without replacing the whole prescription. Accepts the same object
+ * shape as an entry in the `medicines` array, so whatever produced the original JSON can
+ * produce this too.
+ */
+async function cmdAdd(ctx: CmdCtx, args: string): Promise<void> {
+  const ap = await activePatient(ctx);
+  if (ap === null) return needsSetup(ctx);
+
+  let raw = args.trim();
+  const fence = /```(?:json)?\s*([\s\S]*?)```/.exec(raw);
+  if (fence !== null) raw = fence[1]!.trim();
+
+  if (raw === '') {
+    await reply(
+      ctx,
+      '<b>Adding one medicine</b>\n\n' +
+        'Send it as JSON, the same shape as one entry in a prescription:\n' +
+        '<code>/add {"id":"painkiller","name":"painkiller","dose":"1 tablet",' +
+        '"schedule":{"type":"as_needed"},"min_gap":"6h","max_per_day":4}</code>\n\n' +
+        'Use /prompt to get the full format, or /import to replace everything at once.',
+    );
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    await reply(ctx, `❌ That isn't valid JSON.\n<code>${esc(e instanceof Error ? e.message : String(e))}</code>`);
+    return;
+  }
+
+  // Validate it exactly as an import would, by wrapping it in a one-medicine document.
+  const wrapped = { version: 1, medicines: Array.isArray(parsed) ? parsed : [parsed] };
+  const result = parsePrescription(wrapped, { now: ctx.now });
+  if (!result.ok) {
+    await reply(ctx, `❌ <b>I couldn't use that</b>\n\n${result.errors.map((e) => `• ${esc(e)}`).join('\n')}`);
+    return;
+  }
+
+  const existing = await ctx.db.medsFor(ap.patient.id, true);
+  const clash = result.value!.meds.find((m) => existing.some((e) => e.medKey === m.medKey));
+  if (clash !== undefined) {
+    await reply(
+      ctx,
+      `There is already a medicine with the id <code>${esc(clash.medKey)}</code>. ` +
+        'Give it a different <code>id</code>, or use /edit to change the existing one.',
+    );
+    return;
+  }
+
+  await ctx.db.addMedicines(ap.patient.id, result.value!.meds, ctx.now);
+  await ctx.db.wakeNow(ap.patient.id, ctx.now);
+  const added = result.value!.meds
+    .map((m) => `• <b>${esc(m.name)}</b> — ${esc(describeSchedule(m))}, ${esc(describeCourse(m))}`)
+    .join('\n');
+  const warnings = result.warnings.length > 0
+    ? `\n\n<b>Worth checking</b>\n${result.warnings.map((w) => `• ${esc(w)}`).join('\n')}`
+    : '';
+  await reply(ctx, `➕ <b>Added</b>\n${added}${warnings}`);
+}
+
 // --- help ----------------------------------------------------------------
 
 async function needsSetup(ctx: CmdCtx): Promise<void> {
@@ -813,17 +1165,18 @@ Tap ✅ on the reminder, or:
 If I already logged a dose as missed and you actually took it, just tell me the real time — I'll correct it and recalculate from there.
 
 <b>Your prescription</b>
-<code>/import</code> — send new JSON (I show a preview and wait for confirmation)
+<code>/prompt</code> — get the prompt for turning a photo into JSON
+<code>/import</code> — send new JSON (I preview it and wait for confirmation)
+<code>/add {...}</code> — add one medicine
+<code>/edit antibiotic drop every 3h</code> — change one thing
+<code>/extend antibiotic drop 3d</code> — lengthen a course
 <code>/meds</code> · <code>/export</code> · <code>/pause</code> · <code>/resume</code> · <code>/stop</code>
-<code>/tz Asia/Dhaka</code>
-
-<b>Getting the JSON</b>
-Photograph your prescription and ask any AI chatbot:
-<i>"Convert this prescription photo to JSON using this schema: {version, timezone, meals[], groups[], medicines[{id, name, dose, schedule:{type: interval|fixed_times|meal, every, times, meals, relation, offset}, group, course:{days}}]}. Eye drops that must be spaced apart share a group."</i>
-Paste the answer here. I check it carefully and show you what changes before anything happens.
+<code>/log 7</code> — adherence · <code>/tz Asia/Dhaka</code>
 
 <b>Sharing</b>
-<code>/caregiver &lt;code&gt;</code> — become someone's backup. If they don't answer within a few minutes, I'll ask you instead.
+<code>/invite</code> — get a code so someone can back you up. If you don't answer within a few minutes, I'll ask them instead, and they can answer for you.
+
+Every evening I send a short summary of the day. If that stops arriving, something is wrong — <code>/health</code> tells you whether the scheduler is still running.
 
 ⚠️ <i>I'm a reminder, not a doctor. Follow your prescription, and don't rely on me alone for anything critical.</i>`,
   );
