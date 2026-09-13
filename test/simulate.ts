@@ -15,6 +15,7 @@ import type {
 } from '../src/core/domain.js';
 import { isLive } from '../src/core/domain.js';
 import { HOUR, MINUTE, zoneFor } from '../src/core/tz.js';
+import type { NormalizedMed, NormalizedPrescription } from '../src/core/prescription.js';
 import { rollForwardAfter } from '../src/core/planSchedule.js';
 import type { Zone } from '../src/core/tz.js';
 
@@ -122,6 +123,54 @@ export function makeChat(over: Partial<Chat> & { chatId: number }): Chat {
     active: true,
     ...over,
   };
+}
+
+/**
+ * Turn a parsed prescription into simulator medicines, so a scenario can be driven by the
+ * same JSON a patient would actually import rather than by a hand-built approximation.
+ */
+export function medsFromPrescription(meds: NormalizedMed[]): Medicine[] {
+  return meds.map((m, i) =>
+    makeMed({
+      id: i + 1,
+      medKey: m.medKey,
+      name: m.name,
+      doseText: m.doseText,
+      kind: m.kind,
+      spec: m.spec,
+      steps: m.steps,
+      stepSpacingMs: m.stepSpacingMs,
+      spacingGroup: m.spacingGroup,
+      spacingMs: m.spacingMs,
+      groupSeq: m.groupSeq,
+      phases: m.phases,
+      intervalMs: m.intervalMs,
+      minGapMs: m.minGapMs,
+      onsetOffsetMs: m.onsetOffsetMs,
+      maxPerDay: m.maxPerDay,
+      awakeOnly: m.awakeOnly,
+      critical: m.critical,
+      driftPolicy: m.driftPolicy,
+      driftToleranceMs: m.driftToleranceMs,
+      catchupGraceMs: m.catchupGraceMs,
+      nagPolicy: m.nagPolicy,
+      mergeable: m.mergeable,
+      courseKind: m.courseKind,
+      courseDays: m.courseDays,
+      courseDoses: m.courseDoses,
+      courseUntil: m.courseUntil,
+    }),
+  );
+}
+
+export function mealDefsFromPrescription(meals: NormalizedPrescription['meals']): MealDef[] {
+  return meals.map((m) => ({
+    patientId: 1,
+    meal: m.meal,
+    typicalLocal: m.typicalLocal,
+    askAfterLocal: m.askAfterLocal,
+    presumeAtLocal: m.presumeAtLocal,
+  }));
 }
 
 export class World {

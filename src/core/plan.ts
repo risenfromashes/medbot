@@ -230,6 +230,29 @@ export function plan(state: PatientState, now: number, z: Zone): Action[] {
       };
     }
 
+    // The wake anchor may have moved since this dose was scheduled -- the patient was
+    // presumed awake at nine and actually surfaced at noon. A dose still sitting on the
+    // old anchor has to follow, or confirming "I'm up" would leave the morning's
+    // reminders stranded in the past and firing immediately.
+    if (
+      med.spec.anchor === 'wake' &&
+      (live.status === 'scheduled' || live.status === 'due' || live.status === 'prompted') &&
+      live.effectiveDueAt < facts.wakeAnchor &&
+      (med.lastTakenAt === null || med.lastTakenAt < facts.wakeAnchor)
+    ) {
+      const moved = reviveAtWake(med, facts, now);
+      if (moved > live.effectiveDueAt) {
+        emit({ t: 'retimeDose', doseId: live.id, effectiveDueAt: moved, anchorKind: 'wake' });
+        // The planned time moves with it: this dose belongs to today, not to the morning
+        // that never happened, and drift absorption should measure from the new grid.
+        live = { ...live, effectiveDueAt: moved, plannedDueAt: moved, anchorKind: 'wake' };
+        if (live.promptId !== null) {
+          emit({ t: 'closePrompt', promptId: live.promptId, state: 'cancelled', at: now });
+          live = { ...live, promptId: null, status: 'scheduled' };
+        }
+      }
+    }
+
     // Sleep gating. Critical medicines pierce it; everything else parks as a single
     // deferred dose rather than accumulating one per missed interval.
     if (med.awakeOnly && !med.critical) {

@@ -32,6 +32,13 @@ Presuming *asleep* only suppresses non-critical medicines, never one flagged `cr
 Being wrong in that direction costs a delayed reminder; being wrong the other way costs a
 missed dose.
 
+**A confirmation overrides a presumption, retroactively.** Someone presumed awake at nine
+who actually surfaces at noon and says so moves the whole day to noon: wake-anchored
+medicines restart from then, and any dose still sitting on the abandoned nine o'clock
+anchor is moved forward with it rather than left stranded in the past and firing at once.
+The min-gap floor still applies, so if they genuinely did take something before saying
+"I'm up", the next dose waits out the gap.
+
 ### Drift
 
 The obvious rule — next dose is the last one plus the interval — is wrong in a way that

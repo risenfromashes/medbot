@@ -79,23 +79,32 @@ function rawCycleStart(
   switch (med.kind) {
     case 'interval': {
       const interval = med.intervalMs ?? HOUR;
+      const onWake = med.spec.anchor === 'wake';
 
-      // First cycle ever, or the first after a break: hang it off the wake anchor when
-      // the prescription says to, otherwise start now.
-      if (med.lastCycleStartAt === null) {
-        if (med.spec.anchor === 'wake') {
+      // The first cycle of *this* waking day.
+      //
+      // Not just the first ever: if nothing has been taken since the patient got up, the
+      // day starts from when they got up. That matters when they surface at noon after
+      // the bot had already presumed them awake at nine -- saying "I'm up" has to move the
+      // whole schedule to noon, not continue a grid anchored on a morning that did not
+      // happen. The min-gap floor applied by the caller still prevents a double dose if
+      // they did take something just beforehand.
+      const staleCycle = med.lastCycleStartAt === null || (onWake && med.lastCycleStartAt < facts.wakeAnchor);
+      if (staleCycle) {
+        if (onWake) {
           return { at: Math.max(facts.wakeAnchor + med.onsetOffsetMs, now), anchor: 'wake' };
         }
-        return { at: now, anchor: 'actual' };
+        if (med.lastCycleStartAt === null) return { at: now, anchor: 'actual' };
       }
 
+      const lastCycleStartAt = med.lastCycleStartAt ?? now;
       switch (med.driftPolicy) {
         case 'strict_actual':
-          return { at: med.lastCycleStartAt + interval, anchor: 'actual' };
+          return { at: lastCycleStartAt + interval, anchor: 'actual' };
 
         case 'strict_grid':
           return {
-            at: (med.lastPlannedDueAt ?? med.lastCycleStartAt) + interval,
+            at: (med.lastPlannedDueAt ?? lastCycleStartAt) + interval,
             anchor: 'grid',
           };
 
@@ -105,10 +114,10 @@ function rawCycleStart(
           // genuinely late one re-bases on when it was actually taken, which is the
           // "I missed it, carry on from here" behaviour people expect.
           const planned = med.lastPlannedDueAt;
-          if (planned !== null && med.lastCycleStartAt <= planned + med.driftToleranceMs) {
+          if (planned !== null && lastCycleStartAt <= planned + med.driftToleranceMs) {
             return { at: planned + interval, anchor: 'grid' };
           }
-          return { at: med.lastCycleStartAt + interval, anchor: 'actual' };
+          return { at: lastCycleStartAt + interval, anchor: 'actual' };
         }
       }
     }

@@ -277,7 +277,14 @@ export class Db {
               .prepare(
                 `UPDATE doses SET effective_due_at = ?2,
                    anchor_kind = COALESCE(?3, anchor_kind),
-                   status = CASE WHEN status = 'deferred' THEN 'scheduled' ELSE status END
+                   -- A dose moved onto a new wake anchor belongs to today, so its planned
+                   -- time moves with it and drift is measured from the new grid.
+                   planned_due_at = CASE WHEN ?3 = 'wake' THEN ?2 ELSE planned_due_at END,
+                   prompt_id = CASE WHEN ?3 = 'wake' THEN NULL ELSE prompt_id END,
+                   status = CASE
+                     WHEN status = 'deferred' THEN 'scheduled'
+                     WHEN ?3 = 'wake' AND status IN ('due','prompted') THEN 'scheduled'
+                     ELSE status END
                  WHERE id = ?1`,
               )
               .bind(realDose(a.doseId), a.effectiveDueAt, a.anchorKind ?? null),
