@@ -4,6 +4,12 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
 
+  // Serve only the stable workers.dev hostname. Per-version preview URLs would expose
+  // the same Worker, with the same secrets and the same health data, on URLs that are
+  // never rotated and never used.
+  "workers_dev": true,
+  "preview_urls": false,
+
   // One tick a minute. Cloudflare's minimum, and far finer than medicine needs.
   // The tick is idempotent and works on "what is due at or before now" rather than
   // "what is due this minute", so a dropped or late tick self-heals rather than
@@ -16,7 +22,7 @@
       "database_name": "medbot",
       // Replaced by `wrangler d1 create medbot`, or provisioned automatically by the
       // Deploy to Cloudflare button.
-      "database_id": "REPLACE_WITH_YOUR_DATABASE_ID"
+      "database_id": "41be7c44-7061-4768-a34d-a0dfa63eb066"
     }
   ],
 
