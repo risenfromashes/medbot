@@ -93,6 +93,22 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+/**
+ * A number, however the chatbot chose to write it. `"days": "7"` and `"n": "4"` are both
+ * things a language model emits when it is being helpful about JSON types, and reading
+ * them as "no course" or "no count" is a silent wrong answer rather than a loud one.
+ */
+function numOf(v: unknown): number | null {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string') {
+    const t = v.trim();
+    if (t === '' || !/^-?\d+(?:\.\d+)?$/.test(t)) return null;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
 class Ctx {
   errors: string[] = [];
   warnings: string[] = [];
@@ -133,8 +149,80 @@ class Ctx {
   }
 }
 
-/** 'before breakfast' style dose patterns common on South Asian prescriptions. */
-const PATTERN_MEALS = ['breakfast', 'lunch', 'dinner'];
+/**
+ * Which meal each slot of a dose pattern belongs to.
+ *
+ * Three slots is the classic morning-noon-night. Four is just as common on a Bangladeshi
+ * or Indian prescription -- morning, noon, evening, night -- and there the third dose
+ * falls between lunch and dinner, tied to no meal at all; `null` marks that, and the
+ * caller spreads the day out instead of pretending it is a meal. Two slots is the
+ * shorthand for twice a day.
+ */
+const PATTERN_SLOTS: Record<number, (string | null)[]> = {
+  2: ['breakfast', 'dinner'],
+  3: ['breakfast', 'lunch', 'dinner'],
+  4: ['breakfast', 'lunch', null, 'dinner'],
+};
+
+const UNICODE_FRACTIONS: Record<string, string> = {
+  '\u00bd': '1/2',
+  '\u00bc': '1/4',
+  '\u00be': '3/4',
+  '\u2153': '1/3',
+  '\u2154': '2/3',
+};
+
+export interface PatternRead {
+  /** How much is taken in each slot; zero means "not in that slot". */
+  slots: number[];
+  /** 'after food' written next to the pattern, if it was. */
+  relation: 'before' | 'after' | 'with' | null;
+}
+
+/**
+ * Read a dose pattern as people actually write them.
+ *
+ * Prescriptions are transcribed by hand and by chatbot, so the same instruction arrives as
+ * "1+0+1", "1-0-1", "1+1+1+1", "\u00bd+0+\u00bd", "1+0+1 after food", or "Tab 1+0+1 (\u09aa\u09b0\u09c7)". All of
+ * those mean something unambiguous to a pharmacist and should mean the same to the bot.
+ * Returns null only when there is genuinely no pattern in the string.
+ */
+export function readPattern(raw: string): PatternRead | null {
+  let s = raw.trim().toLowerCase();
+  for (const [glyph, value] of Object.entries(UNICODE_FRACTIONS)) s = s.split(glyph).join(value);
+  s = s.replace(/[\u2013\u2014\u2212]/g, '-');
+
+  const relation: PatternRead['relation'] = /\bbefore\b/.test(s)
+    ? 'before'
+    : /\bwith\b/.test(s)
+      ? 'with'
+      : /\bafter\b/.test(s)
+        ? 'after'
+        : null;
+
+  // Pull the numeric run out of whatever surrounds it: 'tab 1+0+1 after food' is a
+  // pattern with commentary, not a malformed pattern.
+  const m = s.match(/\d+(?:\s*[./]\s*\d+)?(?:\s*[+-]\s*\d+(?:\s*[./]\s*\d+)?)+/);
+  if (m === null) return null;
+  const body = m[0].replace(/\s+/g, '');
+  const sep = body.includes('+') ? '+' : '-';
+
+  const slots: number[] = [];
+  for (const part of body.split(sep)) {
+    const frac = part.match(/^(\d+)\/(\d+)$/);
+    if (frac !== null) {
+      const den = Number(frac[2]);
+      if (den === 0) return null;
+      slots.push(Number(frac[1]) / den);
+      continue;
+    }
+    if (!/^\d+(?:\.\d+)?$/.test(part)) return null;
+    slots.push(Number(part));
+  }
+  if (PATTERN_SLOTS[slots.length] === undefined) return null;
+  if (!slots.every((n) => Number.isFinite(n) && n >= 0 && n <= 20)) return null;
+  return { slots, relation };
+}
 
 export function parsePrescription(raw: unknown, opts: { now: number } = { now: Date.now() }): ParseResult {
   const c = new Ctx();
@@ -449,8 +537,10 @@ function parseCourse(
   now: number,
 ): { kind: CourseKind; days: number | null; doses: number | null; until: number | null } {
   if (!isRecord(v)) return { kind: 'indefinite', days: null, doses: null, until: null };
-  if (typeof v['days'] === 'number') return { kind: 'days', days: v['days'], doses: null, until: null };
-  if (typeof v['doses'] === 'number') return { kind: 'doses', days: null, doses: v['doses'], until: null };
+  const days = numOf(v['days']);
+  if (days !== null) return { kind: 'days', days, doses: null, until: null };
+  const doses = numOf(v['doses']);
+  if (doses !== null) return { kind: 'doses', days: null, doses, until: null };
   if (typeof v['until'] === 'string') {
     const t = Date.parse(v['until']);
     if (Number.isNaN(t)) {
@@ -469,6 +559,22 @@ interface ParsedSchedule {
   intervalMs: number | null;
 }
 
+/**
+ * N doses across the waking day: one on waking, the rest evenly spaced until bedtime.
+ *
+ * "Four times a day" at home means four times while you are up, not every six hours
+ * around the clock -- so this anchors on waking rather than on a fixed grid, and a
+ * patient who sleeps until ten does not start the day already two doses behind.
+ */
+function wakeSpread(from: string, to: string, n: number): ParsedSchedule {
+  const a = parseWall(from);
+  const b = parseWall(to);
+  let span = b.h * 60 + b.mi - (a.h * 60 + a.mi);
+  if (span <= 0) span += 24 * 60;
+  const gap = n <= 1 ? 24 * HOUR : Math.round((span / (n - 1)) * MINUTE);
+  return { kind: 'interval', spec: { kind: 'interval', intervalMs: gap, anchor: 'wake' }, intervalMs: gap };
+}
+
 function parseSchedule(
   c: Ctx,
   where: string,
@@ -477,47 +583,80 @@ function parseSchedule(
 ): ParsedSchedule | null {
   // Shorthand: "1+0+1" means morning + noon + night, as written on the prescription.
   if (typeof mr['pattern'] === 'string') {
-    const parts = mr['pattern'].split('+').map((p) => p.trim());
-    if (parts.length === 3 && parts.every((p) => /^\d+$/.test(p))) {
-      const active = parts
-        .map((p, idx) => ({ n: Number(p), meal: PATTERN_MEALS[idx]! }))
-        .filter((x) => x.n > 0);
-      if (active.length === 0) {
-        c.err(where, `"pattern": "${mr['pattern']}" has no doses in it`);
-        return null;
-      }
-      const relation = typeof mr['relation'] === 'string' ? mr['relation'] : 'after';
-      if (active.length === 1) {
-        return {
-          kind: 'meal',
-          spec: {
-            kind: 'meal',
-            meal: {
-              meal: active[0]!.meal,
-              relation: relation === 'before' ? 'before' : relation === 'with' ? 'with' : 'after',
-              offsetMs: c.dur(where, 'offset', mr['offset'], 0) ?? 0,
-            },
-          },
-          intervalMs: null,
-        };
-      }
-      // Several meals a day, still genuinely tied to the meals. Flattening these to clock
-      // times used to be necessary, because a meal was only known once it had happened
-      // and "half an hour before" would already have passed. Now that the bot asks when
-      // the patient is going to eat, the tablet can follow the answer.
-      const rel = relation === 'before' ? 'before' : relation === 'with' ? 'with' : 'after';
-      const offsetMs = c.dur(where, 'offset', mr['offset'], rel === 'before' ? 30 * MINUTE : 0) ?? 0;
+    const read = readPattern(mr['pattern']);
+    if (read === null) {
+      c.err(
+        where,
+        `"pattern": "${mr['pattern']}" should be one number per dose slot -- ` +
+          'like "1+0+1" (morning and night), "1+1+1", "1+1+1+1" or "1/2+0+1/2"',
+      );
+      return null;
+    }
+    const slotMeals = PATTERN_SLOTS[read.slots.length]!;
+    const active = read.slots
+      .map((n, idx) => ({ n, meal: slotMeals[idx]! }))
+      .filter((x) => x.n > 0);
+    if (active.length === 0) {
+      c.err(where, `"pattern": "${mr['pattern']}" has no doses in it`);
+      return null;
+    }
+    if (active.some((a) => a.n !== 1)) {
+      c.warn(
+        where,
+        `"pattern": "${mr['pattern']}" -- I schedule when to take it, not how much, ` +
+          'so check that "dose" says the right amount for each time',
+      );
+    }
+
+    const relation =
+      typeof mr['relation'] === 'string'
+        ? mr['relation'] === 'before'
+          ? 'before'
+          : mr['relation'] === 'with'
+            ? 'with'
+            : 'after'
+        : (read.relation ?? 'after');
+
+    // A four-slot pattern has an evening dose that belongs to no meal. Rather than
+    // pretend it is dinner -- which would put two doses on the same meal, or move one
+    // hours from where the prescription meant it -- spread the day out instead.
+    if (active.some((a) => a.meal === null)) {
+      c.warn(
+        where,
+        `"pattern": "${mr['pattern']}" has a dose between meals, so I spread ` +
+          `${active.length} doses across your waking hours instead of tying them to meals` +
+          ' -- /edit can change that',
+      );
+      return wakeSpread('08:00', '22:00', active.length);
+    }
+
+    if (active.length === 1) {
       return {
         kind: 'meal',
         spec: {
           kind: 'meal',
-          meals: active.map((a) => ({ meal: a.meal, relation: rel, offsetMs })),
+          meal: {
+            meal: active[0]!.meal,
+            relation,
+            offsetMs: c.dur(where, 'offset', mr['offset'], 0) ?? 0,
+          },
         },
         intervalMs: null,
       };
     }
-    c.err(where, `"pattern": "${mr['pattern']}" should look like "1+0+1"`);
-    return null;
+    // Several meals a day, still genuinely tied to the meals. Flattening these to clock
+    // times used to be necessary, because a meal was only known once it had happened
+    // and "half an hour before" would already have passed. Now that the bot asks when
+    // the patient is going to eat, the tablet can follow the answer.
+    const offsetMs = c.dur(where, 'offset', mr['offset'], relation === 'before' ? 30 * MINUTE : 0) ?? 0;
+    return {
+      kind: 'meal',
+      spec: {
+        kind: 'meal',
+        meals: active.map((a) => ({ meal: a.meal, relation, offsetMs })),
+      },
+      intervalMs: null,
+    };
   }
 
   const sr = mr['schedule'];
@@ -554,7 +693,7 @@ function parseSchedule(
   }
 
   if (type === 'times_per_day') {
-    const n = typeof sr['n'] === 'number' ? sr['n'] : typeof sr['count'] === 'number' ? sr['count'] : null;
+    const n = numOf(sr['n']) ?? numOf(sr['count']) ?? numOf(sr['times']);
     if (n === null || n < 1) {
       c.err(where, 'a times_per_day schedule needs "n", e.g. "n": 3');
       return null;
@@ -567,21 +706,14 @@ function parseSchedule(
     // waking is the default: a patient who sleeps until ten should not start the day with
     // a dose already two hours overdue.
     if (sr['anchor'] !== 'clock') {
-      const a = parseWall(from);
-      const b = parseWall(to);
-      let span = (b.h * 60 + b.mi) - (a.h * 60 + a.mi);
-      if (span <= 0) span += 24 * 60;
-      const gap = n === 1 ? 24 * HOUR : Math.round((span / (n - 1)) * MINUTE);
+      const spread = wakeSpread(from, to, n);
       c.warn(
         where,
-        `${n}x a day became one dose on waking, then every ${Math.round(gap / MINUTE / 5) * 5} minutes` +
+        `${n}x a day became one dose on waking, then every ` +
+          `${Math.round((spread.intervalMs ?? 0) / MINUTE / 5) * 5} minutes` +
           ` -- add "anchor": "clock" to pin it to fixed times instead`,
       );
-      return {
-        kind: 'interval',
-        spec: { kind: 'interval', intervalMs: gap, anchor: 'wake' },
-        intervalMs: gap,
-      };
+      return spread;
     }
 
     const times = spreadTimes(from, to, n);
@@ -679,7 +811,11 @@ export function describeSchedule(m: Pick<NormalizedMed, 'kind' | 'spec' | 'inter
       if (refs.length === 0) return 'with meals';
       const first = refs[0]!;
       const off = first.offsetMs > 0 ? `${Math.round(first.offsetMs / MINUTE)} min ` : '';
-      const which = refs.map((r) => r.meal).join(' and ');
+      const names = refs.map((r) => r.meal);
+      const which =
+        names.length > 2
+          ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+          : names.join(' and ');
       return `${off}${first.relation} ${which}`;
     }
     case 'as_needed':

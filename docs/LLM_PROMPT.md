@@ -13,7 +13,8 @@ into the bot.
 1. Photograph your prescription.
 2. Open any AI chatbot (Claude, ChatGPT, Gemini — whichever you have).
 3. Attach the photo and paste the prompt below.
-4. Save the JSON it gives you as `prescription.json`.
+4. Download the `prescription.json` it produces. (The prompt asks for a file; if your
+   chatbot can't make one, copy the JSON into a file yourself.)
 5. Send that **file** to the bot as an attachment — no command needed.
 
    Pasting works too, and the bot stitches together a paste that Telegram has split. But
@@ -27,8 +28,10 @@ it will say which medicine and which field, so you can go back and fix it.
 
 ## The prompt to paste
 
-> Convert this prescription photo into JSON for a medication reminder bot. Output **only**
-> the JSON, no commentary.
+> Convert this prescription photo into JSON for a medication reminder bot.
+>
+> Give me the result as a **downloadable file named `prescription.json`**. If you can't
+> produce a file, output only the JSON and nothing else.
 >
 > ```json
 > {
@@ -88,8 +91,10 @@ it will say which medicine and which field, so you can go back and fix it.
 >   `relation` is `before`, `after` or `with`.
 > - `{"type": "as_needed"}` — PRN / SOS / "when needed". Add `"max_per_day"` and `"min_gap"`.
 >
-> **Shorthand**: if the prescription uses the `1+0+1` notation (morning + noon + night),
-> you may write `"pattern": "1+0+1"` instead of a schedule.
+> **Shorthand**: if the prescription uses the `1+0+1` notation, write it verbatim as
+> `"pattern": "1+0+1"` instead of a schedule. Three slots are morning, noon and night;
+> four are morning, noon, evening and night. `"1+1+1+1"`, `"1-0-1"` and `"1/2+0+1/2"` are
+> all understood, and `"relation": "before"` or `"after"` says which side of the meal.
 >
 > **Rules**
 > - Eye drops, or anything that must be spaced apart, all share the same `"group"`, with

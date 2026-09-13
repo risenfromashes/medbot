@@ -154,6 +154,14 @@ describe('the prescription prompt the bot hands out', () => {
     expect(all).toContain('times_per_day');
   });
 
+  it('asks the chatbot for a downloadable file, since pasting is what breaks', () => {
+    const all = PRESCRIPTION_PROMPT_PARTS.join('\n').toLowerCase();
+    expect(all, 'never asks for a file').toContain('prescription.json');
+    expect(all).toMatch(/downloadable file|as a file/);
+    // And a fallback, because not every chatbot can produce one.
+    expect(all, 'no fallback for a chatbot that cannot make files').toMatch(/can'?t produce a file|copy the json/);
+  });
+
   it('describes every schedule type the parser actually accepts', () => {
     const all = PRESCRIPTION_PROMPT_PARTS.join('\n');
     for (const kind of ['interval', 'fixed_times', 'times_per_day', 'meal', 'as_needed']) {

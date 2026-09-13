@@ -278,6 +278,13 @@ The `1+0+1` shorthand produces a genuinely meal-tied medicine, anchored on break
 dinner, rather than clock times standing in for them. Each dose hangs off whichever meal
 comes next.
 
+Patterns are read the way they are written: `1-0-1`, `½+0+½`, `1/2+0+1/2`, a trailing
+"after food", two slots for twice a day, four for morning/noon/evening/night. The four-slot
+form is the interesting one -- its third dose falls between lunch and dinner and belongs to
+no meal at all, so rather than pretend it is one, those doses are spread across the waking
+day instead. Anything genuinely unreadable is an error naming the shapes that work, never a
+silent guess.
+
 ---
 
 ## The failure modes it's built around
@@ -492,7 +499,8 @@ awake, when to give up and assume it, the same for bedtime, and when to send the
 Five schedule types cover essentially every real prescription: `interval` (anchored on the
 actual last dose), `fixed_times`, `times_per_day` (compiled to fixed times at import),
 `meal` (before/after/with, plus an offset), and `as_needed`. There's shorthand for the
-South Asian `1+0+1` notation so a prescription can be transcribed literally.
+South Asian `1+0+1` notation -- two, three or four slots -- so a prescription can be
+transcribed literally.
 
 Full schema in [`schema/prescription.schema.json`](../schema/prescription.schema.json), a
 worked example in [`examples/example.json`](../examples/example.json), and the prompt

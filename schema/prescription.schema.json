@@ -108,7 +108,7 @@
           },
           "pattern": {
             "type": "string",
-            "description": "Shorthand such as 1+0+1"
+            "description": "Dose-slot shorthand: 2, 3 or 4 slots, e.g. 1+0+1, 1+1+1+1, 1/2+0+1/2. Three slots are morning/noon/night; four are morning/noon/evening/night."
           },
           "schedule": {
             "type": "object",

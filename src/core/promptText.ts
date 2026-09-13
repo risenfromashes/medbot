@@ -14,18 +14,23 @@ export const PRESCRIPTION_PROMPT_PARTS: string[] = [
 1. Photograph your prescription.
 2. Open any AI chatbot — Claude, ChatGPT, Gemini, whichever you have.
 3. Attach the photo and paste the message below.
-4. Save its answer as <b>prescription.json</b> and send me that file. 📎
+4. Download the <b>prescription.json</b> it gives you and send me that file. 📎
 
-<b>Send it as a file, not as text.</b> Telegram splits long pastes across two
-messages, which is where nearly every import problem comes from. Pasting still
-works and I'll stitch the pieces together — but a file just works.
+The prompt already asks it for a downloadable file. If your chatbot can't make
+one, copy the JSON into a file yourself and attach that.
+
+<b>A file, not pasted text.</b> Telegram splits long pastes across two messages,
+which is where nearly every import problem comes from. Pasting still works and
+I'll stitch the pieces back together — but a file just works.
 
 I check everything and show you exactly what would change before anything takes effect.
 
 <i>Tap the block below to copy it.</i>`,
 
   `<pre><code>Convert this prescription photo into JSON for a medication reminder bot.
-Output only the JSON, no commentary.
+
+Give me the result as a downloadable file named prescription.json.
+If you can't produce a file, output only the JSON and nothing else.
 
 Shape:
 {
@@ -80,8 +85,9 @@ partway through -- "4 times a day for 7 days, then 3 times a day for
   ]
 Do NOT flatten a taper to its first phase -- the rest would be lost.
 
-Shorthand: for the 1+0+1 notation you may write "pattern": "1+0+1",
-with "relation": "before" or "after" for before/after meals.
+Shorthand: for the 1+0+1 notation write "pattern" verbatim --
+"1+0+1", "1+1+1", "1+1+1+1" (morning, noon, evening, night) or
+"1/2+0+1/2" all work, with "relation": "before" or "after".
 
 Rules:
 - Eye drops or anything that must be spaced apart share one "group",

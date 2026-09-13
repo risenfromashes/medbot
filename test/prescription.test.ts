@@ -105,6 +105,74 @@ describe('prescription shorthands', () => {
     expect(after.spec.meals![0]!.offsetMs).toBe(0);
   });
 
+  it('reads a four-slot pattern as four doses across the waking day', () => {
+    // "1+1+1+1" is written as often as "1+0+1" here, and rejecting it sent people back to
+    // the chatbot to re-do a prescription that was transcribed perfectly correctly. The
+    // evening dose belongs to no meal, so the day gets spread rather than mangled.
+    const r = parsePrescription({
+      medicines: [{ id: 'ceevit', name: 'Tab. Ceevit 250', pattern: '1+1+1+1' }],
+    }, { now: NOW });
+    expect(r.errors).toEqual([]);
+    expect(r.ok).toBe(true);
+    const m = r.value!.meds[0]!;
+    expect(m.kind).toBe('interval');
+    // 08:00-22:00 shared between four doses: waking, then every ~4h40.
+    expect(m.spec.anchor).toBe('wake');
+    expect(m.intervalMs).toBe(Math.round((14 / 3) * 60) * MINUTE);
+    expect(r.warnings.join(' ')).toMatch(/waking hours/);
+  });
+
+  it('keeps the meals when a four-slot pattern has no evening dose', () => {
+    const r = parsePrescription({
+      medicines: [{ id: 'x', name: 'Y', pattern: '1+1+0+1' }],
+    }, { now: NOW });
+    expect(r.value!.meds[0]!.spec.meals!.map((x) => x.meal)).toEqual(['breakfast', 'lunch', 'dinner']);
+  });
+
+  it('reads the ways people actually write a pattern', () => {
+    const read = (pattern: string): string[] => {
+      const r = parsePrescription({ medicines: [{ id: 'x', name: 'Y', pattern }] }, { now: NOW });
+      expect(r.errors, pattern).toEqual([]);
+      const m = r.value!.meds[0]!;
+      return m.spec.meals?.map((x) => x.meal) ?? (m.spec.meal ? [m.spec.meal.meal] : ['spread']);
+    };
+    expect(read('1-0-1')).toEqual(['breakfast', 'dinner']);          // hyphens
+    expect(read('1 + 0 + 1')).toEqual(['breakfast', 'dinner']);      // spaces
+    expect(read('\u00bd+0+\u00bd')).toEqual(['breakfast', 'dinner']);        // half tablets
+    expect(read('1/2+0+1/2')).toEqual(['breakfast', 'dinner']);      // written out
+    expect(read('Tab 1+0+1 after food')).toEqual(['breakfast', 'dinner']);
+    expect(read('1+1')).toEqual(['breakfast', 'dinner']);            // twice a day
+    expect(read('1+1+1+1')).toEqual(['spread']);
+  });
+
+  it('takes "after food" from the pattern text itself', () => {
+    const r = parsePrescription({
+      medicines: [{ id: 'x', name: 'Y', pattern: '1+0+1 before food' }],
+    }, { now: NOW });
+    expect(r.value!.meds[0]!.spec.meals![0]!.relation).toBe('before');
+  });
+
+  it('says what a broken pattern should look like', () => {
+    const r = parsePrescription({
+      medicines: [{ id: 'x', name: 'Y', pattern: 'twice daily' }],
+    }, { now: NOW });
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(' ')).toMatch(/one number per dose slot/);
+  });
+
+  it('reads numbers the chatbot quoted as strings', () => {
+    // A language model that decides JSON numbers should be strings used to silently lose
+    // the course length -- a 7-day course becoming an indefinite one, with no error.
+    const r = parsePrescription({
+      medicines: [
+        { id: 'x', name: 'Y', schedule: { type: 'times_per_day', n: '3' }, course: { days: '7' } },
+      ],
+    }, { now: NOW });
+    expect(r.errors).toEqual([]);
+    expect(r.value!.meds[0]!.courseKind).toBe('days');
+    expect(r.value!.meds[0]!.courseDays).toBe(7);
+  });
+
   it('reads a single-dose pattern as a meal-relative dose', () => {
     const r = parsePrescription({
       medicines: [{ id: 'x', name: 'Y', pattern: '0+0+1' }],
