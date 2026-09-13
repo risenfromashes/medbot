@@ -14,7 +14,11 @@ export const PRESCRIPTION_PROMPT_PARTS: string[] = [
 1. Photograph your prescription.
 2. Open any AI chatbot — Claude, ChatGPT, Gemini, whichever you have.
 3. Attach the photo and paste the message below.
-4. Send me the JSON it gives back with <code>/import</code>.
+4. Save its answer as <b>prescription.json</b> and send me that file. 📎
+
+<b>Send it as a file, not as text.</b> Telegram splits long pastes across two
+messages, which is where nearly every import problem comes from. Pasting still
+works and I'll stitch the pieces together — but a file just works.
 
 I check everything and show you exactly what would change before anything takes effect.
 

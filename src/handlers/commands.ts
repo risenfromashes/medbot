@@ -9,6 +9,7 @@
 import type { Medicine, Patient } from '../core/domain.js';
 import { describeCourse, describeSchedule, dosesPerDayInterval, hashString, parsePrescription } from '../core/prescription.js';
 import { PRESCRIPTION_PROMPT_PARTS } from '../core/promptText.js';
+import { describeJsonError, extractJson, looksLikeJsonFragment } from '../core/extractJson.js';
 import type { NormalizedPrescription } from '../core/prescription.js';
 import { renderConfirmation, renderEditMenu } from '../core/render.js';
 import { resolveRetro } from '../core/retro.js';
@@ -118,8 +119,10 @@ export async function handleCommand(ctx: CmdCtx, msg: TgIncomingMessage): Promis
   const cmd = m === null ? '' : m[1]!.toLowerCase();
   const args = m === null ? '' : m[2]!.trim();
 
-  // A document attachment is almost always a prescription, whatever the caption says.
-  if (msg.document !== undefined && (cmd === 'import' || cmd === '')) {
+  // A document is almost always a prescription, whatever the caption says -- and
+  // attaching one is the path most likely to work, so it should never need a command
+  // in front of it.
+  if (msg.document !== undefined) {
     await cmdImport(ctx, args, msg);
     return;
   }
@@ -162,12 +165,27 @@ export async function handleCommand(ctx: CmdCtx, msg: TgIncomingMessage): Promis
 
 /** Bare words that ought to just work, because people type them. */
 async function freeText(ctx: CmdCtx, text: string): Promise<void> {
+  // A paste that arrived in pieces continues here. Telegram splits long messages, so the
+  // second half turns up as ordinary text with no command in front of it.
+  const held = await pendingImport(ctx);
+  if (held !== null && looksLikeJsonFragment(text)) {
+    const ap = await activePatient(ctx);
+    if (ap !== null) {
+      await ingestPrescription(ctx, ap.patient.id, held + text, { fromFile: false, continuing: true });
+      return;
+    }
+  }
+
   const t = text.toLowerCase().trim();
   if (/^(taken|done|took it|yes|✅)$/.test(t)) return cmdTook(ctx, '');
   if (/^(awake|i'm up|im up|good morning|morning)$/.test(t)) return cmdWake(ctx, 'wake', '');
   if (/^(sleeping|going to bed|good ?night|bed)$/.test(t)) return cmdWake(ctx, 'sleep', '');
-  // A pasted prescription needs no ceremony.
-  if (t.startsWith('{') && t.includes('medicines')) return cmdImport(ctx, text, { message_id: 0, chat: { id: ctx.chatId, type: 'private' }, date: 0 });
+
+  // A pasted prescription needs no ceremony, complete or not.
+  if (extractJson(text).kind !== 'none') {
+    return cmdImport(ctx, text, { message_id: 0, chat: { id: ctx.chatId, type: 'private' }, date: 0 });
+  }
+
   await reply(ctx, 'Not sure what you meant — /help lists everything I understand.');
 }
 
@@ -922,46 +940,106 @@ async function cmdImport(ctx: CmdCtx, args: string, msg: TgIncomingMessage): Pro
 
   if (msg.document !== undefined) {
     const size = msg.document.file_size ?? 0;
-    if (size > 256_000) {
-      await reply(ctx, 'That file is too large to be a prescription. Send the JSON as text instead.');
+    if (size > 512_000) {
+      await reply(ctx, "That file is far too large to be a prescription — is it the right one?");
       return;
     }
     const file = await ctx.tg.getFile(msg.document.file_id);
-    if (file.ok && file.result !== undefined) {
-      const content = await ctx.tg.downloadFile(file.result.file_path);
-      if (content !== null) raw = content;
+    if (!file.ok || file.result === undefined) {
+      await reply(ctx, "I couldn't fetch that file from Telegram. Try sending it again.");
+      return;
     }
+    const content = await ctx.tg.downloadFile(file.result.file_path);
+    if (content === null) {
+      await reply(ctx, "I couldn't read that file. Try sending it again, or paste the JSON instead.");
+      return;
+    }
+    raw = content;
+    // A fresh file supersedes any half-finished paste.
+    await ctx.db.kvSet(`import:${ctx.chatId}`, '');
   }
 
-  // Chatbots love to wrap JSON in a fence.
-  const fence = /```(?:json)?\s*([\s\S]*?)```/.exec(raw);
-  if (fence !== null) raw = fence[1]!.trim();
-
   if (raw === '') {
+    await reply(ctx, importInstructions());
+    return;
+  }
+
+  await ingestPrescription(ctx, ap.patient.id, raw, { fromFile: msg.document !== undefined });
+}
+
+function importInstructions(): string {
+  return (
+    '<b>Send me your prescription</b>\n\n' +
+    '📎 <b>Best way: attach it as a file.</b> Save the JSON as <code>prescription.json</code> ' +
+    'and send it as a document. Pasting long text into Telegram often splits it across two ' +
+    'messages, which is where most import problems come from.\n\n' +
+    "Pasting still works — if it arrives in pieces I'll stitch them together.\n\n" +
+    "Don't have the JSON yet? Send <code>/prompt</code>."
+  );
+}
+
+/**
+ * Take whatever arrived and try to make a prescription of it.
+ *
+ * Pasted text reaches this in pieces more often than not, because Telegram clients split a
+ * long paste into separate messages. A half-object is held for a few minutes and joined to
+ * whatever comes next, rather than being reported as a syntax error the sender cannot
+ * interpret.
+ */
+async function ingestPrescription(
+  ctx: CmdCtx,
+  patientId: number,
+  raw: string,
+  opts: { fromFile: boolean; continuing?: boolean },
+): Promise<void> {
+  const extracted = extractJson(raw);
+
+  if (extracted.kind === 'none') {
     await reply(
       ctx,
-      '<b>Send me your prescription</b>\n\n' +
-        'Paste the JSON, or attach it as a <code>.json</code> file.\n\n' +
-        "If you don't have it yet: photograph your prescription, open any AI chatbot, and ask it to " +
-        'convert the photo using the format in /help. Paste the result back here.\n\n' +
-        "I'll show you exactly what would change and wait for you to confirm.",
+      opts.continuing === true
+        ? "That doesn't look like part of a prescription. Send /import to start again."
+        : "I couldn't find any JSON in that.\n\n" + importInstructions(),
     );
     return;
   }
 
-  let parsedJson: unknown;
+  if (extracted.kind === 'partial') {
+    if (opts.fromFile) {
+      // A file cannot have been split, so this really is incomplete.
+      await reply(
+        ctx,
+        `⚠️ That file stops part-way through — ${extracted.missing} closing bracket` +
+          `${extracted.missing === 1 ? '' : 's'} short. Check it saved completely and send it again.`,
+      );
+      return;
+    }
+    await ctx.db.kvSet(`import:${ctx.chatId}`, JSON.stringify({ text: extracted.text, at: ctx.now }));
+    await reply(
+      ctx,
+      `📥 Got the first part — send the rest and I'll join them up.\n\n` +
+        `<i>Telegram splits long pastes. If it keeps going wrong, save the JSON as a file and ` +
+        `attach it instead.</i>`,
+    );
+    return;
+  }
+
+  await ctx.db.kvSet(`import:${ctx.chatId}`, '');
+
+  let parsed: unknown;
   try {
-    parsedJson = JSON.parse(raw);
+    parsed = JSON.parse(extracted.text);
   } catch (e) {
     await reply(
       ctx,
-      `❌ That isn't valid JSON.\n<code>${esc(e instanceof Error ? e.message : String(e))}</code>\n\n` +
-        'If you copied it from a chatbot, make sure you got the whole thing including the outer <code>{</code> and <code>}</code>.',
+      `❌ <b>That isn't valid JSON</b>\n\n<code>${esc(describeJsonError(extracted.text, e))}</code>\n\n` +
+        'If you pasted it, try attaching it as a <code>.json</code> file instead — that avoids ' +
+        'the message being split or reformatted.',
     );
     return;
   }
 
-  const result = parsePrescription(parsedJson, { now: ctx.now });
+  const result = parsePrescription(parsed, { now: ctx.now });
   if (!result.ok) {
     await reply(
       ctx,
@@ -972,12 +1050,14 @@ async function cmdImport(ctx: CmdCtx, args: string, msg: TgIncomingMessage): Pro
   }
 
   const presc = result.value!;
-  const diff = await buildDiff(ctx, ap.patient.id, presc);
+  const diff = await buildDiff(ctx, patientId, presc);
   const versionId = await ctx.db.stageePrescription(
-    ap.patient.id, raw, hashString(raw), diff, ctx.chatId, ctx.now,
+    patientId, extracted.text, hashString(extracted.text), diff, ctx.chatId, ctx.now,
   );
 
-  const warnings = result.warnings.length > 0 ? `\n\n<b>Worth checking</b>\n${result.warnings.map((w) => `• ${esc(w)}`).join('\n')}` : '';
+  const warnings = result.warnings.length > 0
+    ? `\n\n<b>Worth checking</b>\n${result.warnings.map((w) => `• ${esc(w)}`).join('\n')}`
+    : '';
   await reply(
     ctx,
     `<b>Here's what would change</b>\n\n${diff}${warnings}\n\n<i>Nothing has been applied yet.</i>`,
@@ -986,6 +1066,23 @@ async function cmdImport(ctx: CmdCtx, args: string, msg: TgIncomingMessage): Pro
       { text: '✖️ Cancel', callback_data: encodeCallback({ a: 'cancelImport', versionId }) },
     ]],
   );
+}
+
+/** A paste that arrived in pieces, if one is still in progress. */
+async function pendingImport(ctx: CmdCtx): Promise<string | null> {
+  const raw = await ctx.db.kvGet(`import:${ctx.chatId}`);
+  if (raw === null || raw === '') return null;
+  try {
+    const held = JSON.parse(raw) as { text: string; at: number };
+    // Ten minutes, after which an abandoned half-paste stops hijacking ordinary messages.
+    if (ctx.now - held.at > 10 * 60_000) {
+      await ctx.db.kvSet(`import:${ctx.chatId}`, '');
+      return null;
+    }
+    return held.text;
+  } catch {
+    return null;
+  }
 }
 
 /** Plain English, because the person reading it is holding a prescription, not a diff tool. */

@@ -13,8 +13,11 @@ into the bot.
 1. Photograph your prescription.
 2. Open any AI chatbot (Claude, ChatGPT, Gemini — whichever you have).
 3. Attach the photo and paste the prompt below.
-4. Copy the JSON it gives you.
-5. Send `/import` to the bot, then paste the JSON as your next message.
+4. Save the JSON it gives you as `prescription.json`.
+5. Send that **file** to the bot as an attachment — no command needed.
+
+   Pasting works too, and the bot stitches together a paste that Telegram has split. But
+   a file avoids the problem entirely, which is why it is the recommended route.
 
 medbot validates everything, tells you in plain English exactly what would change, and
 waits for you to press **Apply**. Nothing takes effect until you do. If the JSON is wrong
