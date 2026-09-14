@@ -13,6 +13,7 @@ import { handleCommand } from './commands.js';
 import type { CmdCtx } from './commands.js';
 import { handleCallback } from './callbacks.js';
 import type { Env, TgUpdate } from '../types.js';
+import { FALLBACK_NAME, looksLikeRealName } from '../core/names.js';
 
 export async function handleWebhook(
   request: Request,
@@ -62,12 +63,18 @@ async function process(env: Env, db: Db, update: TgUpdate, now: number): Promise
     // most of the reason to ever ask.
     await db.touchActivity(msg.chat.id, now);
 
+    // Telegram does not always know who this is, and a placeholder makes a poor name for
+    // a person whose medicines the bot is about to start announcing.
+    const candidate = msg.from?.first_name ?? msg.chat.first_name ?? msg.chat.title ?? null;
+    const inferred = looksLikeRealName(candidate) ? candidate!.trim() : null;
+
     const ctx: CmdCtx = {
       env,
       db,
       tg,
       chatId: msg.chat.id,
-      userName: msg.from?.first_name ?? msg.chat.first_name ?? 'there',
+      userName: inferred ?? FALLBACK_NAME,
+      nameKnown: inferred !== null,
       now,
     };
     await handleCommand(ctx, msg);

@@ -114,6 +114,28 @@ describe('things people actually send', () => {
   });
 });
 
+describe('someone with nothing to take', () => {
+  it('is never asked whether they are awake', async () => {
+    // The caregiver half of a household often takes nothing at all. Polling them about a
+    // day with no medicines in it is pure noise, and noise is what gets a bot muted.
+    await enrol();
+    bot.clear();
+    await bot.run(26 * 3600_000, 10 * 60_000);
+    const asked = bot.textsTo(PATIENT).filter((t) => /awake|bed/i.test(t));
+    expect(asked, `asked ${asked.length} pointless questions`).toEqual([]);
+  });
+
+  it('starts asking once there is a prescription', async () => {
+    await enrol();
+    await importDoc(SIMPLE);
+    await bot.send(PATIENT, '/sleep');
+    await bot.tap(PATIENT, /turning in/i).catch(() => undefined);
+    bot.clear();
+    await bot.run(26 * 3600_000, 10 * 60_000);
+    expect(bot.textsTo(PATIENT).join('\n')).toMatch(/awake|Moxifloxacin|morning/i);
+  });
+});
+
 describe('the timezone nobody sets', () => {
   it('warns loudly when it still thinks you are in UTC', async () => {
     await enrol();

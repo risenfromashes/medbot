@@ -71,8 +71,14 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
   const findOpen = (kind: Prompt['kind'], meal?: string): Prompt | undefined =>
     openPrompts.find((q) => q.kind === kind && (meal === undefined || q.body.meal === meal));
 
+  // Nobody with nothing to take should be asked whether they are awake. The day-state
+  // machine still runs -- it costs nothing and is right when a prescription arrives -- but
+  // the questions are for people who have a reason to be asked.
+  const hasActiveMeds = state.meds.some((m) => m.status === 'active');
+
   let createdPrompt = false;
   const emitWatching = (a: Action): void => {
+    if (a.t === 'createPrompt' && !hasActiveMeds) return;
     if (a.t === 'createPrompt') createdPrompt = true;
     emit(a);
   };

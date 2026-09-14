@@ -14,6 +14,8 @@ import type { NormalizedPrescription } from '../core/prescription.js';
 import { renderConfirmation, renderEditMenu } from '../core/render.js';
 import { resolveRetro } from '../core/retro.js';
 import { parseDuration, parseTime, splitTrailingTime } from '../core/timeparse.js';
+import { remainingFor, summarise } from '../core/remaining.js';
+import { looksLikeRealName } from '../core/names.js';
 import { HOUR, MINUTE, fmtDuration, isValidTimeZone, parseWall, zoneFor } from '../core/tz.js';
 import type { Zone } from '../core/tz.js';
 import { Db } from '../io/db.js';
@@ -59,6 +61,8 @@ export interface CmdCtx {
   tg: Telegram;
   chatId: number;
   userName: string;
+  /** False when Telegram gave us nothing usable and `userName` is only a stand-in. */
+  nameKnown?: boolean;
   now: number;
 }
 
@@ -169,6 +173,40 @@ export async function handleCommand(ctx: CmdCtx, msg: TgIncomingMessage): Promis
 }
 
 /** Bare words that ought to just work, because people type them. */
+/**
+ * Ask what to call someone, and take the next thing they say as the answer.
+ *
+ * Telegram gives a first name most of the time, and when it does this never runs. When it
+ * does not, the alternative was calling a patient "Member" in every reminder for ever,
+ * because the way to fix it was buried inside /settings and nobody knew to look.
+ */
+async function askForName(ctx: CmdCtx, patientId: number): Promise<void> {
+  await ctx.db.kvSet(`askname:${ctx.chatId}`, JSON.stringify({ patientId, at: ctx.now }));
+  await reply(
+    ctx,
+    "One thing first — <b>what should I call you?</b>\n\n" +
+      'Telegram has not told me your name, and I would rather not guess. ' +
+      'Just send it, or <code>/name Ayesha</code> any time.',
+  );
+}
+
+/** The pending "what should I call you?", if the answer is still expected. */
+async function awaitingName(ctx: CmdCtx): Promise<number | null> {
+  const raw = await ctx.db.kvGet(`askname:${ctx.chatId}`);
+  if (raw === null || raw === '') return null;
+  try {
+    const held = JSON.parse(raw) as { patientId: number; at: number };
+    // An hour. Past that, an ordinary message is an ordinary message again.
+    if (ctx.now - held.at > HOUR) {
+      await ctx.db.kvSet(`askname:${ctx.chatId}`, '');
+      return null;
+    }
+    return held.patientId;
+  } catch {
+    return null;
+  }
+}
+
 async function freeText(ctx: CmdCtx, text: string): Promise<void> {
   // A paste that arrived in pieces continues here. Telegram splits long messages, so the
   // second half turns up as ordinary text with no command in front of it.
@@ -179,6 +217,13 @@ async function freeText(ctx: CmdCtx, text: string): Promise<void> {
       await ingestPrescription(ctx, ap.patient.id, held + text, { fromFile: false, continuing: true });
       return;
     }
+  }
+
+  // "What should I call you?" was asked; this is the answer.
+  const pendingName = await awaitingName(ctx);
+  if (pendingName !== null && !text.trim().startsWith('/') && looksLikeRealName(text)) {
+    await ctx.db.kvSet(`askname:${ctx.chatId}`, '');
+    return cmdSettings(ctx, `name ${text.trim()}`);
   }
 
   const t = text.toLowerCase().trim();
@@ -251,6 +296,7 @@ async function cmdStart(ctx: CmdCtx, args: string): Promise<void> {
       `<i>If I've got your name wrong, <code>/name Ayesha</code> fixes it. And if someone ` +
       `should be told when you miss a dose, <code>/invite</code> gives them a code.</i>`,
   );
+  if (ctx.nameKnown === false) await askForName(ctx, patientId);
 }
 
 /**
@@ -417,6 +463,7 @@ async function cmdCaregiver(ctx: CmdCtx, args: string): Promise<void> {
   if (own === undefined) {
     const ownId = await ctx.db.createPatient(ctx.userName, patient?.tz ?? 'UTC', ctx.now);
     await ctx.db.linkChat(ctx.chatId, ownId, 'patient', 0, 5 * MINUTE, ctx.now, ctx.userName);
+    if (ctx.nameKnown === false) await askForName(ctx, ownId);
     own = (await ctx.db.linksForChat(ctx.chatId)).find((l) => l.role === 'patient');
   }
 
@@ -954,12 +1001,39 @@ async function statusFor(ctx: CmdCtx, view: { patient: Patient; z: Zone; isSelf:
   const rows = await ctx.db.adherence(patient.id, today);
   let taken = 0;
   let missed = 0;
+  const doneByMed = new Map<number, number>();
   for (const r of rows) {
     if (r.status === 'taken') taken += r.n;
     if (r.status === 'missed') missed += r.n;
+    // Taken, missed and skipped are all behind you; only what is left counts as left.
+    doneByMed.set(r.medId, (doneByMed.get(r.medId) ?? 0) + r.n);
   }
+
+  // How much of the course is still ahead. The question anyone three days into a week of
+  // eye drops actually has, and the one /status could not answer.
+  let leftToday = 0;
+  let leftCourse = 0;
+  let openEnded = false;
+  const perMed: string[] = [];
+  for (const med of meds) {
+    if (med.status !== 'active') continue;
+    const r = remainingFor(med, patient, doneByMed.get(med.id) ?? 0, ctx.now, z, today);
+    if (r.perDay === 0) continue;
+    leftToday += r.today;
+    if (r.course === null) openEnded = true;
+    else leftCourse += r.course;
+    perMed.push(
+      `• ${esc(med.name)} — ${r.today} today` +
+        (r.course === null ? ', ongoing' : `, ${r.course} left`),
+    );
+  }
+  const summary = summarise(leftToday, leftCourse, openEnded);
+  if (summary !== '') {
+    lines.push('', `<b>Doses left</b> — ${summary}`, ...perMed);
+  }
+
   if (taken > 0 || missed > 0) {
-    lines.push('', `<b>Today</b> — ${taken} taken${missed > 0 ? `, ${missed} missed` : ''}`);
+    lines.push('', `<b>Today so far</b> — ${taken} taken${missed > 0 ? `, ${missed} missed` : ''}`);
   }
 
   // Meals matter only if something actually depends on them.
