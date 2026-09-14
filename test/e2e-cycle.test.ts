@@ -452,3 +452,69 @@ describe('doses that fall past bedtime', () => {
     }
   });
 });
+
+describe('the morning reference', () => {
+  it('is where asking starts, and setting it moves what belongs to tomorrow', async () => {
+    const { AdminDb } = await import('../src/io/adminDb.js');
+    const admin = new AdminDb(bot.d1 as never);
+    const inv = await admin.createInvite('enrol', { createdBy: 'a', ttlMs: 86400_000 }, bot.now);
+    await bot.send(PATIENT, `/start ${inv.code}`, { firstName: 'Ifti' });
+    await bot.sendFile(PATIENT, 'p.json', JSON.stringify({
+      version: 1, timezone: 'Asia/Dhaka',
+      day: { morning_poll_at: '06:30', presumed_wake_at: '08:00', evening_poll_at: '22:30', presumed_sleep_at: '23:00' },
+      medicines: [{ id: 'aqua', name: 'Aquafresh', schedule: { type: 'interval', every: '2h', anchor: 'wake' } }],
+    }));
+    await bot.tap(PATIENT, /Apply|Confirm|Yes/i);
+    await bot.send(PATIENT, '/awake');
+
+    // "wake" is an alias for the morning reference now, not a setting of its own.
+    await bot.send(PATIENT, '/settings wake 09:00');
+    expect(bot.d1.one('SELECT morning_poll_at FROM patients')?.['morning_poll_at'],
+      'setting the morning did nothing at all').toBe('09:00');
+
+    const { encodeCallback } = await import('../src/core/callbackCodec.js');
+    while (bot.now < at('22:45')) {
+      await bot.tick();
+      for (const r of bot.d1.rows("SELECT id FROM doses WHERE status IN ('due','prompted')")) {
+        await bot.sendCallback(PATIENT, encodeCallback({ a: 'take', doseId: Number(r['id']) }));
+      }
+      bot.now += 5 * MINUTE;
+    }
+    const next = bot.d1.one("SELECT effective_due_at FROM doses WHERE status IN ('scheduled','deferred','due','prompted')");
+    if (next !== null) {
+      const t = Number(next['effective_due_at']);
+      const insideGrace = t <= at('00:00', 1);
+      expect(insideGrace || t >= at('09:00', 1), `next dose at ${z.fmtTime12(t)}, before the morning they set`).toBe(true);
+    }
+  });
+
+  it('never brings a dose forward into the small hours', async () => {
+    // The min-gap can refuse an earlier time. When it does, the dose is tomorrow's --
+    // "brought forward" to ten past four in the morning is not brought forward.
+    const { AdminDb } = await import('../src/io/adminDb.js');
+    const admin = new AdminDb(bot.d1 as never);
+    const inv = await admin.createInvite('enrol', { createdBy: 'a', ttlMs: 86400_000 }, bot.now);
+    await bot.send(PATIENT, `/start ${inv.code}`, { firstName: 'Ifti' });
+    await bot.sendFile(PATIENT, 'p.json', JSON.stringify({
+      version: 1, timezone: 'Asia/Dhaka',
+      day: { morning_poll_at: '06:30', presumed_wake_at: '09:00', evening_poll_at: '22:30', presumed_sleep_at: '23:00' },
+      medicines: [{ id: 'ceevit', name: 'Ceevit', schedule: { type: 'times_per_day', n: 4 }, min_gap: '4h30m', course: { days: 7 } }],
+    }));
+    await bot.tap(PATIENT, /Apply|Confirm|Yes/i);
+    await bot.send(PATIENT, '/awake');
+
+    const { encodeCallback } = await import('../src/core/callbackCodec.js');
+    while (bot.now < at('23:30')) {
+      await bot.tick();
+      for (const r of bot.d1.rows("SELECT id FROM doses WHERE status IN ('due','prompted')")) {
+        await bot.sendCallback(PATIENT, encodeCallback({ a: 'take', doseId: Number(r['id']) }));
+      }
+      bot.now += 5 * MINUTE;
+    }
+    const next = bot.d1.one("SELECT effective_due_at FROM doses WHERE status IN ('scheduled','deferred','due','prompted')");
+    expect(next).not.toBeNull();
+    const t = Number(next!['effective_due_at']);
+    const smallHours = t > at('00:00', 1) && t < at('06:00', 1);
+    expect(smallHours, `dose sits at ${z.fmtTime12(t)} — the middle of the night`).toBe(false);
+  });
+});

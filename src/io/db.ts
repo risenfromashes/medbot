@@ -176,6 +176,16 @@ export class Db {
         this.d1.prepare('SELECT * FROM meal_defs WHERE patient_id = ?1').bind(patientId),
         this.d1.prepare('SELECT * FROM meal_events WHERE patient_id = ?1 AND local_day = ?2').bind(patientId, today),
         this.d1.prepare('SELECT * FROM day_counters WHERE patient_id = ?1 AND local_day = ?2').bind(patientId, today),
+        // The waking day, which is what "four times a day" actually means.
+        this.d1
+          .prepare(
+            `SELECT med_id, COUNT(*) AS n FROM doses
+              WHERE patient_id = ?1 AND status IN ('taken','missed','skipped') AND step = 0
+                AND COALESCE(taken_at, resolved_at, 0) >=
+                  (SELECT COALESCE(last_wake_at, wake_state_since, 0) FROM patients WHERE id = ?1)
+              GROUP BY med_id`,
+          )
+          .bind(patientId),
     ]);
 
     // Indexed rather than destructured: `noUncheckedIndexedAccess` is on, and an empty
@@ -190,6 +200,9 @@ export class Db {
       dayCounters.set(num(r['med_id']), { taken: num(r['taken']), missed: num(r['missed']) });
     }
 
+    const dosesSinceWake = new Map<number, number>();
+    for (const r of rows(8)) dosesSinceWake.set(num(r['med_id']), num(r['n']));
+
     return {
       patient: rowToPatient(prow),
       chats: rows(1).map(rowToChat),
@@ -199,6 +212,7 @@ export class Db {
       mealDefs: rows(5).map(rowToMealDef),
       mealEvents: rows(6).map(rowToMealEvent),
       dayCounters,
+      dosesSinceWake,
     };
   }
 

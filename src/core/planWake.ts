@@ -203,10 +203,7 @@ export function planWake(
     // and no earlier than the time the patient is normally asked about.
     earliestWake:
       wakeState === 'asleep'
-        ? Math.max(
-            sleepFloor,
-            Math.min(z.nextWallAtOrAfter(p.morningPollAt, now), z.nextWallAtOrAfter(p.presumedWakeAt, now)),
-          )
+        ? Math.max(sleepFloor, z.nextWallAtOrAfter(p.morningPollAt, now))
         : null,
   };
 }

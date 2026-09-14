@@ -2127,10 +2127,13 @@ async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
 
   const parts = args.trim().split(/\s+/).filter((x) => x !== '');
   const FIELDS: Record<string, { column: string; label: string }> = {
-    morning: { column: 'morning_poll_at', label: 'start asking if you are awake' },
-    wake: { column: 'presumed_wake_at', label: 'assume you are awake by' },
+    // "wake" is an alias, not a second setting. It used to mean "assume they are awake by
+    // this time", and nothing assumes that any more -- so someone setting it got a
+    // confirmation and no change whatsoever. It means the same thing people meant by it.
+    morning: { column: 'morning_poll_at', label: 'start asking if you are up, from' },
+    wake: { column: 'morning_poll_at', label: 'start asking if you are up, from' },
     evening: { column: 'evening_poll_at', label: 'start asking if you are in bed' },
-    sleep: { column: 'presumed_sleep_at', label: 'assume you are asleep by' },
+    sleep: { column: 'presumed_sleep_at', label: 'take as your usual bedtime' },
     digest: { column: 'digest_at', label: 'send the daily summary' },
   };
 
@@ -2255,8 +2258,7 @@ async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
     `<b>⚙️ Settings</b> · ${esc(patient.displayName)}\n\n` +
       `Name           <code>${esc(patient.displayName)}</code>\n` +
       `Timezone       <code>${esc(patient.tz)}</code> — it's ${z.fmtTime12(ctx.now)} there\n` +
-      `Morning ask    <code>${esc(patient.morningPollAt)}</code>\n` +
-      `Assume awake   <code>${esc(patient.presumedWakeAt)}</code>\n` +
+      `Start asking   <code>${esc(patient.morningPollAt)}</code> <i>— never assumed</i>\n` +
       `Usual bedtime  <code>${esc(patient.presumedSleepAt)}</code>` +
         `${patient.expectedSleepAt === null ? '' : ` — tonight <b>${z.fmtTime12(patient.expectedSleepAt)}</b>`}\n` +
       `Ask before bed <code>${esc(fmtDuration(patient.bedLeadFirstMs))}</code> then ` +
@@ -2267,8 +2269,7 @@ async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
       `Daily summary  <code>${esc(patient.digestAt)}</code>\n\n` +
       `<b>To change one</b>\n` +
       `<code>/name Ayesha</code>\n` +
-      `<code>/settings morning 06:30</code>\n` +
-      `<code>/settings wake 09:00</code>\n` +
+      `<code>/settings morning 09:00</code>\n` +
       `<code>/settings sleep 01:00</code>\n` +
       `<code>/settings bedask1 1h</code> · <code>/settings bedask2 30m</code>\n` +
       `<code>/settings bedgrace 1h</code> · <code>/settings wakecheck 1h</code>\n` +

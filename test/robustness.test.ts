@@ -18,6 +18,7 @@ function stateWith(meds: Medicine[], over: Partial<PatientState> = {}): PatientS
     mealDefs: [],
     mealEvents: [],
     dayCounters: new Map(),
+  dosesSinceWake: new Map(),
     ...over,
   };
 }

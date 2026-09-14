@@ -218,6 +218,7 @@ export class World {
       mealDefs: opts.mealDefs ?? [],
       mealEvents: [],
       dayCounters: new Map(),
+      dosesSinceWake: new Map(),
     };
   }
 
@@ -301,8 +302,12 @@ export class World {
     p.wakeState = kind === 'wake' ? 'awake' : 'asleep';
     p.wakeConfidence = 'confirmed';
     p.wakeStateSince = when;
-    if (kind === 'wake') p.lastWakeAt = when;
-    else p.lastSleepAt = when;
+    if (kind === 'wake') {
+      p.lastWakeAt = when;
+      this.state.dosesSinceWake = new Map();
+    } else {
+      p.lastSleepAt = when;
+    }
     p.lastActivityAt = this.now;
     p.nextActionAt = this.now;
     for (const q of this.state.openPrompts) {
@@ -355,6 +360,12 @@ export class World {
       this.state.dayCounters.set(key, c);
       void day;
     }
+    // The waking day's tally, which is what a "four times a day" quota is counted against.
+    if (status === 'taken' || status === 'missed' || status === 'skipped') {
+      if (dose.step === 0 || med.steps.length === 1) {
+        this.state.dosesSinceWake.set(med.id, (this.state.dosesSinceWake.get(med.id) ?? 0) + 1);
+      }
+    }
 
     this.doseLog.push({
       at: this.now,
@@ -396,8 +407,13 @@ export class World {
           p.wakeState = a.state;
           p.wakeConfidence = a.confidence;
           p.wakeStateSince = a.at;
-          if (a.state === 'awake') p.lastWakeAt = a.at;
-          else p.lastSleepAt = a.at;
+          if (a.state === 'awake') {
+            p.lastWakeAt = a.at;
+            // A new waking day starts its own count.
+            this.state.dosesSinceWake = new Map();
+          } else {
+            p.lastSleepAt = a.at;
+          }
           break;
         }
 

@@ -378,20 +378,27 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
       live.takenAt === null &&
       live.plannedDueAt > facts.sleepFrom - BEDTIME_MARGIN
     ) {
-      const counter = state.dayCounters.get(med.id);
-      const doneToday = (counter?.taken ?? 0) + (counter?.missed ?? 0);
+      // Counted against the waking day, not the calendar one. A dose brought forward to
+      // ten past midnight falls on the following date while plainly belonging to the day
+      // before it, and counting by date said three when four had been taken -- so the
+      // schedule offered a fifth.
+      const doneToday = state.dosesSinceWake.get(med.id) ?? 0;
       const quota = med.spec.dosesPerDay ?? null;
-      const withinGrace = live.plannedDueAt <= facts.sleepFrom + p.postBedGraceMs;
+      const graceEnd = facts.sleepFrom + p.postBedGraceMs;
+      const withinGrace = live.plannedDueAt <= graceEnd;
       const owedToday = quota !== null && doneToday < quota;
 
       // The min-gap floor is the one thing that can refuse, and it is never overridden.
-      const desired = withinGrace || owedToday
-        ? Math.max(
-            facts.sleepFrom - BEDTIME_MARGIN,
-            med.lastTakenAt === null ? -Infinity : med.lastTakenAt + med.minGapMs,
-            med.lastCycleStartAt === null ? -Infinity : med.lastCycleStartAt + med.minGapMs,
-            now,
-          )
+      const pulled = Math.max(
+        facts.sleepFrom - BEDTIME_MARGIN,
+        med.lastTakenAt === null ? -Infinity : med.lastTakenAt + med.minGapMs,
+        med.lastCycleStartAt === null ? -Infinity : med.lastCycleStartAt + med.minGapMs,
+        now,
+      );
+      // And if the gap will not allow it before the grace hour is out, it was never a
+      // bring-forward: ten past four in the morning is not "before bed", it is tomorrow.
+      const desired = (withinGrace || owedToday) && pulled <= graceEnd
+        ? pulled
         : Math.max(facts.wakeNext, live.plannedDueAt);
 
       if (Math.abs(desired - live.effectiveDueAt) > MINUTE) {

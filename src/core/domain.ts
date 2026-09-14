@@ -412,6 +412,16 @@ export interface PatientState {
   mealEvents: MealEvent[];
   /** Doses taken and missed today, per medicine id. Drives `maxPerDay`. */
   dayCounters: Map<number, { taken: number; missed: number }>;
+  /**
+   * Doses resolved since the patient got up, per medicine.
+   *
+   * Not the same as `dayCounters`, and the difference matters. A dose brought forward to
+   * ten past midnight belongs to the calendar day after the one it is part of, so
+   * counting "today's four" off the local day said three when four had been taken -- and
+   * the schedule dutifully offered a fifth. The waking day is the one a prescription
+   * means when it says "four times a day".
+   */
+  dosesSinceWake: Map<number, number>;
 }
 
 // ---------------------------------------------------------------------------
