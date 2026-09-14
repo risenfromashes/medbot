@@ -7,37 +7,59 @@ const z = zoneFor(TZ);
 const at = (day: number, hhmm: string): number => z.wallOnDayUtc(z.addLocalDays('2026-09-14', day), hhmm);
 
 describe('the silent-failure guards', () => {
-  it('doses anyway when the patient never answers at all', () => {
+  it('never stops asking when the patient answers nothing at all', () => {
     // The worst realistic case: phone on charge, nobody touches it all morning.
+    //
+    // The bot no longer decides at half past nine that they must be up -- guessing a wake
+    // time misplaces every dose hung off it, and dosing someone who is still asleep is the
+    // wrong error to make. What it must never do is go quiet, so the guarantee is that it
+    // keeps asking, and that the asking climbs to whoever backs them up.
     const w = new World({
       start: at(0, '05:00'),
+      patient: {
+        wakeState: 'asleep', wakeConfidence: 'confirmed',
+        wakeStateSince: at(0, '00:00'), expectedWakeAt: at(0, '06:00'),
+      },
       meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR })],
+      chats: [makeChat({ chatId: 100 }), makeChat({ chatId: 200, escalationTier: 1, escalateAfterMs: 5 * MINUTE })],
     });
 
     w.run(7 * HOUR); // 05:00 -> 12:00, answering nothing
 
-    // Presumed awake at 09:30 must have started the schedule regardless.
-    const doseMsgs = w.sent.filter((s) => s.kind === 'dose');
-    expect(doseMsgs.length, 'no medicine reminders at all -- the bot went silent').toBeGreaterThan(0);
-    expect(w.state.patient.wakeState).toBe('awake');
-    expect(w.state.patient.wakeConfidence).toBe('presumed');
-    // And it anchored on the fallback time, not on whenever the tick happened to run.
-    expect(z.fmtTime(w.state.patient.lastWakeAt!)).toBe('09:30');
+    const asked = w.sent.filter((m) => m.kind === 'wake');
+    expect(asked.length, 'the bot went silent instead of asking').toBeGreaterThan(2);
+    expect(
+      asked.some((m) => m.chatId === 200),
+      'nobody else was told that she has not surfaced',
+    ).toBe(true);
+    // And it did not invent a wake time to dose against.
+    expect(w.state.patient.wakeState).toBe('asleep');
   });
 
-  it('treats any inbound message as proof the patient is up', () => {
+  it('asks rather than assumes when the patient stirs', () => {
+    // A message after a full night is evidence, not proof: the honest answer is often
+    // "hours ago", and starting the day from the wrong moment misplaces every dose in it.
     const w = new World({
       start: at(0, '07:30'),
+      patient: {
+        wakeState: 'asleep', wakeConfidence: 'confirmed',
+        wakeStateSince: at(0, '00:00'),
+        expectedWakeAt: at(0, '12:00'), // deliberately later than now
+      },
       meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR })],
     });
     w.run(MINUTE);
     expect(w.state.patient.wakeState).toBe('asleep');
 
     w.state.patient.lastActivityAt = w.now; // she replied to something
+    w.state.patient.nextActionAt = w.now;
     w.run(2 * MINUTE);
 
-    expect(w.state.patient.wakeState).toBe('awake');
-    expect(w.state.patient.wakeConfidence).toBe('inferred');
+    expect(w.state.patient.wakeState, 'guessed a wake time from a single message').toBe('asleep');
+    expect(
+      w.state.openPrompts.some((q) => q.kind === 'wake'),
+      'stirring produced neither a question nor a decision',
+    ).toBe(true);
   });
 
   it('does not double-dose when a dose is taken just before declaring wake', () => {

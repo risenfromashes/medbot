@@ -40,11 +40,17 @@ back; the tablets move with you.
 Took something and forgot to tap? Tell it when, even hours later, even if it had already
 written that dose off. It fixes the record and recalculates from the real time.
 
-In the evening it asks if you're off to bed. Say yes and it tells you what's still
-outstanding — take them, skip them, or leave them for the morning — then goes quiet.
-Anything you leave comes back when you actually get up, re-timed to then. Naps need no
-announcement; `/sleep` is for the end of the day, and it won't let you end one that
-started an hour ago.
+In the evening it asks whether you're still turning in around the usual time — an hour
+before, and again half an hour before — and lists what's worth taking first. Push it back
+by half an hour or an hour as often as you like; the schedule moves with you, and a dose
+that would have landed after bedtime is brought forward rather than lost. If you say
+nothing it takes the usual time, then keeps chasing anything still outstanding for an hour
+after.
+
+**It never decides you're awake.** It asks, and keeps asking, until you say. If you woke up
+an hour before reaching for your phone, tell it that, and it'll work out what was due in
+between and offer each one back — most of the time you did take them, you just didn't say
+so.
 
 ## Who it's for
 

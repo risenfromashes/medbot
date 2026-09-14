@@ -31,6 +31,9 @@ import { esc } from './html.js';
  */
 const MERGE_WINDOW = 5 * MINUTE;
 
+/** How long before bedtime a brought-forward dose is placed, so there is time to take it. */
+const BEDTIME_MARGIN = 30 * MINUTE;
+
 export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
   // Everything downstream assumes sane numbers and readable times. One malformed row
   // must not be able to throw, because an exception here means this patient silently
@@ -90,7 +93,8 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
     today,
     emitWatching,
     (kind) => findOpen(kind) !== undefined,
-    (kind) => findOpen(kind)?.id ?? null,
+    (kind) => openPrompts.filter((q) => q.kind === kind).map((q) => q.id),
+    (stage) => openPrompts.some((q) => q.kind === 'sleep' && q.body.bedStage === stage),
   );
   push(wake.wakeAt);
 
@@ -122,11 +126,17 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
   const sleepFrom =
     wake.state === 'asleep'
       ? Math.min(wake.asleepSince ?? now, now)
-      : z.nextWallAtOrAfter(p.presumedSleepAt, Math.max(wake.wakeAnchor, now - 12 * HOUR));
+      : (wake.expectedSleepAt ?? z.nextWallAtOrAfter(p.presumedSleepAt, Math.max(wake.wakeAnchor, now - 12 * HOUR)));
   const wakeNext =
     wake.state === 'asleep'
       ? (wake.earliestWake ?? z.nextWallAtOrAfter(p.morningPollAt, now))
       : z.nextWallAtOrAfter(p.morningPollAt, sleepFrom);
+
+  /**
+   * How long outstanding reminders survive after bedtime. Measured from the moment sleep
+   * actually began -- including one presumed on this very tick.
+   */
+  const graceUntil = (wake.asleepSince ?? p.wakeStateSince) + p.postBedGraceMs;
 
   const facts: DayFacts = {
     wakeAnchor: wake.wakeAnchor,
@@ -349,6 +359,32 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
       }
     }
 
+    // A dose that would land after tonight's bedtime is brought forward to just before
+    // it, not left to be discarded. Four times a day means four times in the day you are
+    // actually having: if the fourth would fall at half past one and you are turning in at
+    // one, it belongs at half past midnight, where you can still take it. The min-gap
+    // floor is the one thing that can refuse -- it is never overridden.
+    if (
+      med.awakeOnly && !med.critical && facts.awake &&
+      typeof facts.sleepFrom === 'number' &&
+      (live.status === 'scheduled' || live.status === 'due') &&
+      live.takenAt === null &&
+      live.effectiveDueAt > facts.sleepFrom - BEDTIME_MARGIN &&
+      live.effectiveDueAt < facts.sleepFrom + 6 * HOUR
+    ) {
+      const wanted = facts.sleepFrom - BEDTIME_MARGIN;
+      const floor = Math.max(
+        med.lastTakenAt === null ? -Infinity : med.lastTakenAt + med.minGapMs,
+        med.lastCycleStartAt === null ? -Infinity : med.lastCycleStartAt + med.minGapMs,
+        now,
+      );
+      const moved = Math.max(wanted, floor);
+      if (moved < live.effectiveDueAt - MINUTE) {
+        emit({ t: 'retimeDose', doseId: live.id, effectiveDueAt: moved });
+        live = { ...live, effectiveDueAt: moved };
+      }
+    }
+
     // Sleep gating. Critical medicines pierce it; everything else parks as a single
     // deferred dose rather than accumulating one per missed interval.
     //
@@ -360,7 +396,12 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
       const duringSleep =
         live.effectiveDueAt <= now ||
         (typeof facts.wakeNext === 'number' && live.effectiveDueAt < facts.wakeNext);
-      if (!facts.awake && duringSleep && live.status !== 'deferred') {
+      // A dose that was already being asked about when bedtime arrived keeps being asked
+      // about for the grace hour. Parking it the instant the clock said "asleep" is what
+      // made the grace period meaningless: there was never anything left outstanding.
+      const chasingInGrace =
+        (live.status === 'due' || live.status === 'prompted') && now < graceUntil;
+      if (!facts.awake && duringSleep && !chasingInGrace && live.status !== 'deferred') {
         emit({ t: 'setDoseStatus', doseId: live.id, status: 'deferred' });
         settled.push({ dose: { ...live, status: 'deferred' }, med });
         continue;
@@ -394,7 +435,12 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
     }
 
     if (live.status === 'due' && live.promptId === null) {
-      if (facts.awake || med.critical) readyToPrompt.push({ dose: live, med });
+      // Awake, or the medicine says the night is no obstacle. A dose marked not
+      // awake-only was reaching 'due' and then sitting there unasked-for until morning,
+      // because only `critical` was checked here while the deferral above looked at both.
+      if (facts.awake || med.critical || !med.awakeOnly || now < graceUntil) {
+        readyToPrompt.push({ dose: live, med });
+      }
       else push(now + 15 * MINUTE);
     }
 
@@ -455,11 +501,44 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
     scheduleFollowUps(r.med);
   }
 
+  // --- 4b. tell the bedtime question what is still to be taken ------------
+  // Asking "still turning in at one?" without naming the two drops still outstanding
+  // wastes the one moment someone is actually thinking about going to bed.
+  const bedtimeOpen = openPrompts.some((q) => q.kind === 'sleep' && q.body.bedStage !== undefined);
+  const bedtimeNew = out.filter((a) => a.t === 'createPrompt' && a.kind === 'sleep' && a.body.bedStage !== undefined);
+  if (bedtimeOpen || bedtimeNew.length > 0) {
+    const beforeBed = settled
+      .filter((x) => x.dose.takenAt === null && x.dose.effectiveDueAt <= (facts.sleepFrom ?? Infinity))
+      .sort((a, b) => a.dose.effectiveDueAt - b.dose.effectiveDueAt)
+      .slice(0, 6)
+      .map((x) => ({
+        doseId: x.dose.id,
+        label: x.med.steps.length > 1 ? `${x.med.steps[x.dose.step]?.name ?? x.med.name}` : x.med.name,
+        at: x.dose.effectiveDueAt,
+      }));
+    if (beforeBed.length > 0) {
+      // The prompt created this tick is still just an action, so its body is patched in
+      // place; an older one already in the database is updated through an action of its own.
+      for (const a of bedtimeNew) {
+        if (a.t === 'createPrompt') a.body = { ...a.body, beforeBed };
+      }
+      for (const prompt of openPrompts) {
+        if (prompt.kind !== 'sleep' || prompt.body.bedStage === undefined || (prompt.body.beforeBed ?? []).length > 0) continue;
+        emit({ t: 'setPromptBody', promptId: prompt.id, body: { ...prompt.body, beforeBed } });
+      }
+    }
+  }
+
   // --- 5. nag and escalate open prompts -----------------------------------
   for (const prompt of openPrompts) {
     // Don't nag a sleeping patient about a non-critical dose. The prompt stays open and
     // resumes in the morning rather than being lost.
-    const suppressed = prompt.kind === 'dose' && !facts.awake && !promptIsCritical(prompt, state);
+    // Sleep silences new nagging, but not for the first hour: a dose still outstanding at
+    // ten past one is chased, because "assumed asleep" is an assumption and an unanswered
+    // medicine is a fact.
+    const inGrace = !facts.awake && now < graceUntil;
+    const suppressed =
+      prompt.kind === 'dose' && !facts.awake && !inGrace && !promptPiercesSleep(prompt, state);
     if (suppressed) continue;
 
     const policy = nagPolicyFor(prompt, state);
@@ -525,15 +604,31 @@ function beforeMealContext(
   return { beforeMeal: { meal: ref.meal, inMs } };
 }
 
-function promptIsCritical(prompt: Prompt, state: PatientState): boolean {
+/**
+ * Does this prompt go out even while the patient is asleep?
+ *
+ * Critical medicines, obviously. But also anything explicitly marked as not awake-only:
+ * that flag exists precisely to say "round the clock", and the scheduler already refuses
+ * to park such a dose overnight. Suppressing its *prompt* meant the dose sat due and
+ * unasked-for until morning -- the two halves of the same rule disagreeing.
+ */
+function promptPiercesSleep(prompt: Prompt, state: PatientState): boolean {
   return prompt.body.doseIds.some((id) => {
     const dose = state.liveDoses.find((d) => d.id === id);
     if (dose === undefined) return false;
-    return state.meds.find((m) => m.id === dose.medId)?.critical ?? false;
+    const med = state.meds.find((m) => m.id === dose.medId);
+    if (med === undefined) return false;
+    return med.critical || !med.awakeOnly;
   });
 }
 
 function nagPolicyFor(prompt: Prompt, state: PatientState): { stepsMs: number[]; escalateAfterMs: number } {
+  // The "are you up?" question runs on its own cadence -- hourly by default -- because it
+  // may go unanswered all night and a half-hourly buzz through the small hours is the
+  // opposite of what it is for.
+  if (prompt.kind === 'wake') {
+    return { stepsMs: [state.patient.wakeCheckEveryMs], escalateAfterMs: 15 * MINUTE };
+  }
   for (const id of prompt.body.doseIds) {
     const dose = state.liveDoses.find((d) => d.id === id);
     if (dose === undefined) continue;

@@ -178,6 +178,11 @@ async function actingPatient(ctx: CmdCtx, args = ''): Promise<Acting | { ambiguo
 }
 
 /** Unwrap the above, answering the ambiguity or the missing setup itself. */
+export async function actingFor(ctx: CmdCtx): Promise<Acting | null> {
+  const found = await actingPatient(ctx, '');
+  return found === null || 'ambiguous' in found ? null : found;
+}
+
 async function acting(ctx: CmdCtx, args = '', verb = 'that'): Promise<Acting | null> {
   const found = await actingPatient(ctx, args);
   if (found === null) {
@@ -934,6 +939,7 @@ async function cmdTook(ctx: CmdCtx, args: string): Promise<void> {
     const line = renderConfirmation(label, outcome.takenAt, z, ctx.userName, outcome.takenAt < ctx.now - 2 * MINUTE);
     await reply(ctx, line + warn);
     await broadcast(dctx, chats, line, ctx.chatId);
+    await noteSpacedNeighbours(ctx, patient.id, target, outcome.takenAt);
     return;
   }
 
@@ -1492,6 +1498,130 @@ async function medicineList(ctx: CmdCtx, patientId: number): Promise<string> {
   return `<b>You're on:</b>\n${meds.map((m) => `• ${esc(m.name)} — <code>/took ${esc(m.medKey)}</code>`).join('\n')}`;
 }
 
+/**
+ * "You got up at seven and it's eleven — here's what was due in between."
+ *
+ * The point of asking when someone actually woke rather than assuming it. A retrospective
+ * wake time means hours of doses that were either taken and never logged, or genuinely
+ * missed, and a bot that silently starts from now writes all of them off. They are
+ * reconstructed as missed -- the honest default -- and each comes back with a button to
+ * say otherwise, which is the whole reason for asking the question.
+ */
+export async function offerMissedSince(ctx: CmdCtx, patientId: number, wokeAt: number): Promise<void> {
+  const gap = ctx.now - wokeAt;
+  if (gap < 30 * MINUTE) return;
+
+  const patient = await ctx.db.getPatient(patientId);
+  if (patient === null) return;
+  const z = zoneFor(patient.tz);
+  const meds = await ctx.db.medsFor(patientId);
+
+  const lines: string[] = [];
+  const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+
+  for (const med of meds) {
+    if (med.status !== 'active' || med.kind !== 'interval') continue;
+    const interval = med.intervalMs ?? 0;
+    if (interval <= 0 || med.spec.anchor !== 'wake') continue;
+
+    // Where the schedule would have put each dose, from the stated wake time forward.
+    // A dose parked overnight is about to be revived at "now", so the gap stops short of
+    // it; anything already logged in the window is left alone, since they may have
+    // answered some of it at the time.
+    const live = await ctx.db.liveDoseFor(med.id);
+    const stopAt = live === null ? ctx.now : Math.min(ctx.now, live.effectiveDueAt);
+    const times: number[] = [];
+    for (let at = wokeAt + med.onsetOffsetMs; at < stopAt && times.length < 8; at += interval) {
+      if (med.lastTakenAt !== null && Math.abs(at - med.lastTakenAt) < med.minGapMs) continue;
+      times.push(at);
+    }
+    if (times.length === 0) continue;
+
+    const made = await ctx.db.reconstructMissed(med, patientId, times, (at) => z.localDay(at), ctx.now);
+    lines.push(
+      `• <b>${esc(med.name)}</b> — ${made.map((m) => z.fmtTime12(m.at)).join(', ')}`,
+    );
+    // One button per medicine, against its most recent reconstructed dose: the common
+    // case is "yes I took these", not a per-dose audit at eleven in the morning.
+    const latest = made[made.length - 1];
+    if (latest !== undefined) {
+      buttons.push([
+        { text: `✅ Took ${med.name.slice(0, 22)}`, callback_data: encodeCallback({ a: 'tookPast', doseId: latest.id }) },
+      ]);
+    }
+  }
+
+  if (lines.length === 0) return;
+  await reply(
+    ctx,
+    `🕐 <b>While you were up but not telling me</b>\n\n${lines.join('\n')}\n\n` +
+      `I've logged those as missed for now. Tap below for anything you actually took, ` +
+      `or <code>/took ${esc(meds[0]?.medKey ?? 'name')} 8am</code> to be exact.`,
+    buttons,
+  );
+}
+
+/**
+ * "Right — the next drop in ten minutes."
+ *
+ * Two drops ten minutes apart usually arrive as two reminders sitting in the chat at
+ * once, and answering the first silently pushes the second back. Silently is the problem:
+ * the second reminder just sits there looking overdue, and the obvious thing to do with
+ * an overdue reminder is tap it, which is how you end up with two drops in one eye.
+ *
+ * So say it. And offer the one honest alternative -- they may genuinely have done both --
+ * rather than making them wait ten minutes to tell the truth.
+ *
+ * Only for a dose taken *just now*: a retrospective "/took drops 5pm" says nothing about
+ * what is happening in the next ten minutes. And only for group members still outstanding,
+ * never one already skipped or answered.
+ */
+export async function noteSpacedNeighbours(
+  ctx: CmdCtx,
+  patientId: number,
+  med: Medicine,
+  takenAt: number,
+): Promise<void> {
+  if (med.spacingGroup === null || med.spacingMs <= 0) return;
+  if (Math.abs(takenAt - ctx.now) > 2 * MINUTE) return; // not "just now"
+
+  const patient = await ctx.db.getPatient(patientId);
+  if (patient === null) return;
+  const z = zoneFor(patient.tz);
+
+  const waiting: Array<{ label: string; at: number; doseId: number }> = [];
+  for (const other of await ctx.db.medsFor(patientId)) {
+    if (other.id === med.id || other.status !== 'active') continue;
+    if (other.spacingGroup !== med.spacingGroup) continue;
+    const live = await ctx.db.liveDoseFor(other.id);
+    if (live === null) continue;
+    if (live.status !== 'due' && live.status !== 'prompted' && live.status !== 'scheduled') continue;
+    if (live.takenAt !== null) continue;
+    waiting.push({
+      label: other.steps.length > 1 ? (other.steps[live.step]?.name ?? other.name) : other.name,
+      at: 0,
+      doseId: live.id,
+    });
+  }
+  if (waiting.length === 0) return;
+
+  // Where the spacing constraint will actually put them, in the order the planner uses.
+  const spacing = Math.max(med.spacingMs, 0);
+  waiting.forEach((w, i) => {
+    w.at = takenAt + spacing * (i + 1);
+  });
+
+  const lines = waiting.map((w) => `• <b>${esc(w.label)}</b> — ${z.fmtTime12(w.at)}`);
+  await reply(
+    ctx,
+    `⏳ <b>Give it ${esc(fmtDuration(spacing))}.</b>\n\n${lines.join('\n')}\n\n` +
+      `<i>I'll remind you. Tap below only if you have already done ${waiting.length === 1 ? 'it' : 'them'}.</i>`,
+    waiting.slice(0, 3).map((w) => [
+      { text: `✅ Already did ${w.label.slice(0, 20)}`, callback_data: encodeCallback({ a: 'take', doseId: w.doseId }) },
+    ]),
+  );
+}
+
 /** A paste that arrived in pieces, if one is still in progress. */
 async function pendingImport(ctx: CmdCtx): Promise<string | null> {
   const raw = await ctx.db.kvGet(`import:${ctx.chatId}`);
@@ -2016,6 +2146,32 @@ async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
     return;
   }
 
+  const DURATIONS: Record<string, { column: string; label: string; lo: number; hi: number }> = {
+    bedask1: { column: 'bed_lead_first_ms', label: 'first ask before bedtime', lo: 5 * MINUTE, hi: 6 * HOUR },
+    bedask2: { column: 'bed_lead_second_ms', label: 'second ask before bedtime', lo: 5 * MINUTE, hi: 6 * HOUR },
+    bedgrace: { column: 'post_bed_grace_ms', label: 'keep chasing after bedtime for', lo: 0, hi: 4 * HOUR },
+    wakecheck: { column: 'wake_check_every_ms', label: 'ask if you are up every', lo: 15 * MINUTE, hi: 6 * HOUR },
+  };
+  if (parts.length >= 2 && DURATIONS[parts[0]!.toLowerCase()] !== undefined) {
+    const entry = DURATIONS[parts[0]!.toLowerCase()]!;
+    const ms = parseDuration(parts.slice(1).join(' '));
+    if (ms === null || ms < entry.lo || ms > entry.hi) {
+      await reply(
+        ctx,
+        `Give me a length between ${esc(fmtDuration(entry.lo))} and ${esc(fmtDuration(entry.hi))}, ` +
+          `e.g. <code>/settings ${esc(parts[0] ?? '')} 45m</code>.`,
+      );
+      return;
+    }
+    await ctx.env.MEDBOT_DB
+      .prepare(`UPDATE patients SET ${entry.column} = ?2, next_action_at = ?3 WHERE id = ?1`)
+      .bind(patient.id, ms, ctx.now)
+      .run();
+    await ctx.db.audit(patient.id, 'setting_changed', String(ctx.chatId), { key: entry.column, value: ms }, ctx.now);
+    await reply(ctx, `⚙️ I'll ${esc(entry.label)} <b>${esc(fmtDuration(ms))}</b>.`);
+    return;
+  }
+
   if (parts.length >= 2 && ['mealgap', 'meal_gap', 'betweenmeals'].includes(parts[0]!.toLowerCase())) {
     // The other reason a meal shows later than its stated time: it is never proposed
     // within this of the one before. Three hours suits most people and not everybody.
@@ -2091,22 +2247,28 @@ async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
       `Timezone       <code>${esc(patient.tz)}</code> — it's ${z.fmtTime12(ctx.now)} there\n` +
       `Morning ask    <code>${esc(patient.morningPollAt)}</code>\n` +
       `Assume awake   <code>${esc(patient.presumedWakeAt)}</code>\n` +
-      `Evening ask    <code>${esc(patient.eveningPollAt)}</code>\n` +
-      `Assume asleep  <code>${esc(patient.presumedSleepAt)}</code>\n` +
+      `Usual bedtime  <code>${esc(patient.presumedSleepAt)}</code>` +
+        `${patient.expectedSleepAt === null ? '' : ` — tonight <b>${z.fmtTime12(patient.expectedSleepAt)}</b>`}\n` +
+      `Ask before bed <code>${esc(fmtDuration(patient.bedLeadFirstMs))}</code> then ` +
+        `<code>${esc(fmtDuration(patient.bedLeadSecondMs))}</code> ahead\n` +
+      `Chase after it <code>${esc(fmtDuration(patient.postBedGraceMs))}</code>\n` +
       `Shortest night <code>${esc(fmtDuration(patient.minSleepMs))}</code>\n` +
+      `Ask if awake   every <code>${esc(fmtDuration(patient.wakeCheckEveryMs))}</code>\n` +
       `Daily summary  <code>${esc(patient.digestAt)}</code>\n\n` +
       `<b>To change one</b>\n` +
       `<code>/name Ayesha</code>\n` +
       `<code>/settings morning 06:30</code>\n` +
       `<code>/settings wake 09:00</code>\n` +
-      `<code>/settings evening 22:30</code>\n` +
       `<code>/settings sleep 01:00</code>\n` +
+      `<code>/settings bedask1 1h</code> · <code>/settings bedask2 30m</code>\n` +
+      `<code>/settings bedgrace 1h</code> · <code>/settings wakecheck 1h</code>\n` +
       `<code>/settings minsleep 4h</code>\n` +
       `<code>/settings mealgap 3h</code>\n` +
       `<code>/settings digest 21:30</code>\n` +
       `<code>/tz Asia/Dhaka</code>\n\n` +
-      `<i>"Assume awake" is the safety net: past that time I start reminding you even if ` +
-      `you haven't said you're up, because going quiet is worse than being wrong.</i>`,
+      `<i>The morning time is only where I start asking — I never decide you are up ` +
+      `without being told. Bedtime is a starting point too: I check before it, and you ` +
+      `can push it back as often as you like.</i>`,
   );
 }
 

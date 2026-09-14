@@ -110,6 +110,53 @@ what was done and by whom, so a quiet chat never has to be read as "nothing happ
 
 ## Sleep, precisely
 
+The configured morning and evening times are a **reference**: where the bot starts asking.
+They are never treated as facts about the patient.
+
+**The evening is a negotiation.** Tonight's bedtime starts at the configured hour and then
+belongs to the patient. An hour before it, and again half an hour before (both
+configurable), the bot asks whether it still holds -- *sleep now / −30 / on time / +30 /
++1 hour* -- and names the medicines still worth taking before bed, because that is the
+moment someone is actually thinking about going to sleep. Every shift moves the expectation
+and restarts the same two prompts against the new time, as often as they like. Answering
+nothing leaves it where it is.
+
+A dose that would otherwise land after the expected bedtime is **brought forward** to half
+an hour before it rather than discarded: four times a day means four times in the day you
+are actually having. The min-gap floor is the one thing that can refuse.
+
+Once the expected bedtime passes with no word, sleep is assumed -- but **outstanding
+reminders carry on for a grace hour**. A dose that was already being chased keeps being
+chased; anything the patient does in that hour reopens the question and everything
+recalculates from the new bedtime.
+
+**Waking is never assumed.** Not at nine because nine has arrived. After the minimum sleep
+-- and no earlier than the morning reference -- the bot asks, hourly, until somebody
+answers, escalating to whoever backs them up. Any interaction after a full night earns the
+same question immediately rather than a decision:
+
+> ☀️ Did you just wake up?
+> *Yes, just now · I woke up earlier · +30 min · +1 hour · Going back to sleep*
+
+"Earlier" asks roughly when, and from that moment the bot **reconstructs the doses that
+should have happened** in between, logs them as missed -- the honest default -- and offers
+each back with a button, because the usual truth is "I took it, I just didn't tell you".
+Going back to sleep postpones the checks and they resume later.
+
+So bedtime is inferred from an expectation plus silence; waking is inferred from nothing at
+all. The bot keeps asking until the answer exists, and the schedule continues from there.
+
+**Spaced drops say what they are doing.** Two drops ten minutes apart arrive as two
+reminders at once, and answering the first pushes the second back. It used to do that in
+silence, leaving an overdue-looking reminder whose obvious treatment is to tap it -- which
+is how you get two drops in one eye. Now it says "give it ten minutes, Prednisolone at
+8:13", with one button for the case where they genuinely did both. Only for a dose taken
+just now, and never for a drop already skipped or answered.
+
+---
+
+## Sleep, minimums
+
 `/sleep` ends the day. Three rules follow from that, and each one exists because the
 alternative went wrong in practice.
 

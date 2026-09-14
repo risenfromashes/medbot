@@ -54,6 +54,13 @@ export function makePatient(over: Partial<Patient> = {}): Patient {
     quietStart: null,
     quietEnd: null,
     minSleepMs: 4 * HOUR,
+    expectedSleepAt: null,
+    expectedWakeAt: null,
+    lastWakeCheckAt: null,
+    bedLeadFirstMs: HOUR,
+    bedLeadSecondMs: 30 * MINUTE,
+    postBedGraceMs: HOUR,
+    wakeCheckEveryMs: HOUR,
     wakeState: 'asleep',
     wakeConfidence: 'presumed',
     wakeStateSince: 0,
@@ -694,14 +701,17 @@ export class World {
       ).toBe(true);
     }
 
-    // I5 -- quiet. No non-critical dose message while the patient is asleep.
-    if (this.state.patient.wakeState === 'asleep') {
+    // I5 -- quiet. Nothing reaches a sleeping patient unless it has earned the right:
+    // the medicine is critical, or says outright that it is not confined to waking hours,
+    // or the bedtime grace hour is still running and the dose was already outstanding.
+    const graceUntil = this.state.patient.wakeStateSince + this.state.patient.postBedGraceMs;
+    if (this.state.patient.wakeState === 'asleep' && this.now >= graceUntil) {
       const justSent = this.sent.filter((s) => s.at === this.now && s.kind === 'dose');
       for (const s of justSent) {
         const critical = s.doseIds.some((id) => {
           const d = this.allDoses.find((x) => x.id === id);
           const m = d === undefined ? undefined : this.state.meds.find((mm) => mm.id === d.medId);
-          return m?.critical ?? false;
+          return m === undefined ? false : m.critical || !m.awakeOnly;
         });
         expect(critical, `${t}: non-critical dose message sent while asleep`).toBe(true);
       }

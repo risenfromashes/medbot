@@ -58,37 +58,34 @@ describe('sleep ends the day', () => {
     expect(w.sent.slice(before), 'woke the patient inside the minimum sleep').toEqual([]);
   });
 
-  it('waits out the minimum sleep before presuming anyone is up', () => {
+  it('asks rather than assuming, once the minimum sleep has run out', () => {
+    // Bed at 05:18 with a four-hour minimum: the 06:30 reference falls inside it, so the
+    // question waits until 09:18. And it stays a question -- nothing here decides the
+    // patient is up, because a guessed wake time misplaces every dose hung off it.
     const w = nightWorld(at(0, '05:18'));
     w.declare('sleep');
-    w.run(8 * HOUR);
-    // 06:30 and 09:00 both fall inside the four hours; the day starts at 09:18.
-    expect(w.state.patient.wakeState).toBe('awake');
-    expect(w.state.patient.lastWakeAt).toBeGreaterThanOrEqual(at(0, '09:18'));
-    expect(w.state.patient.lastWakeAt).toBeLessThanOrEqual(at(0, '10:00'));
-  });
-
-  it('asks before it assumes, even when the minimum ran out hours late', () => {
-    // The 06:30 poll and the 09:00 fallback both fell inside the four hours. Rather than
-    // the whole day's dosing arriving unannounced at 09:18, the question comes first and
-    // gets the usual half hour.
-    const w = nightWorld(at(0, '05:18'));
-    w.declare('sleep');
-    w.runUntil((x) => x.state.openPrompts.some((q) => q.kind === 'wake'), 6 * HOUR);
+    w.runUntil((x) => x.state.openPrompts.some((q) => q.kind === 'wake'), 8 * HOUR);
     const asked = w.state.openPrompts.find((q) => q.kind === 'wake');
-    expect(asked, 'never asked, just assumed').toBeDefined();
+    expect(asked, 'never asked at all').toBeDefined();
     expect(asked!.createdAt).toBeGreaterThanOrEqual(at(0, '09:18'));
-    expect(asked!.createdAt).toBeLessThan(at(0, '09:30'));
+    expect(w.state.patient.wakeState, 'decided they were up without being told').toBe('asleep');
   });
 
-  it('anchors the day on the minimum, not on a wake time that passed during it', () => {
-    // Presumed wake is 09:00 and the floor lands at 09:18, plus half an hour's grace for
-    // the question. Anchoring on 09:00 would greet the patient with a dose already
-    // three-quarters of an hour overdue.
+  it('keeps asking, on its own cadence, until it gets an answer', () => {
     const w = nightWorld(at(0, '05:18'));
     w.declare('sleep');
-    w.run(5 * HOUR);
-    expect(w.state.patient.lastWakeAt).toBe(at(0, '09:48'));
+    w.run(14 * HOUR);
+    const asks = w.sent.filter((m) => m.kind === 'wake');
+    expect(asks.length, 'asked once and gave up').toBeGreaterThan(1);
+  });
+
+  it('anchors the day on what the patient says, not on the clock', () => {
+    const w = nightWorld(at(0, '05:18'));
+    w.declare('sleep');
+    w.run(6 * HOUR);
+    w.declare('wake', at(0, '10:40'));
+    w.run(10 * MINUTE);
+    expect(w.state.patient.lastWakeAt).toBe(at(0, '10:40'));
   });
 
   it('ignores a message sent moments after saying goodnight', () => {
@@ -111,27 +108,19 @@ describe('sleep ends the day', () => {
     expect(w.state.patient.wakeState, 'insomnia started the day').toBe('asleep');
   });
 
-  it('still takes a message in the morning as proof of being up', () => {
+  it('asks the moment they stir in the morning, rather than waiting for the hour', () => {
+    // A message after a full night does not start the day by itself -- it earns the
+    // question straight away, instead of waiting for the next scheduled check.
     const w = nightWorld(at(0, '22:10'));
     w.declare('sleep');
-    w.run(9 * HOUR); // 07:10, past the 06:30 morning poll
+    w.run(8 * HOUR); // 06:10, inside the four-hour minimum having passed
+    const before = w.sent.filter((m) => m.kind === 'wake').length;
     w.state.patient.lastActivityAt = w.now;
     w.state.patient.nextActionAt = w.now;
     w.run(5 * MINUTE);
-    expect(w.state.patient.wakeState).toBe('awake');
-  });
-
-  it('lets a nap end without waiting for tomorrow morning', () => {
-    // No morning comes round after an afternoon doze. Without an escape hatch the
-    // patient would get no reminders at all for the rest of the day -- the silence this
-    // whole design exists to prevent, arrived at by way of a safety rule.
-    const w = nightWorld(at(0, '14:00'));
-    w.declare('sleep');
-    w.run(2 * HOUR);
-    w.state.patient.lastActivityAt = w.now;
-    w.state.patient.nextActionAt = w.now;
-    w.run(5 * MINUTE);
-    expect(w.state.patient.wakeState).toBe('awake');
+    expect(w.sent.filter((m) => m.kind === 'wake').length, 'stirring produced no question')
+      .toBeGreaterThan(before);
+    expect(w.state.patient.wakeState, 'a single message started the whole day').toBe('asleep');
   });
 
   it('re-anchors every wake-anchored medicine on the real morning', () => {

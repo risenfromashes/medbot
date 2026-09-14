@@ -9,7 +9,7 @@
 
 import type { Action, Chat, Dose, Medicine, PatientState, Prompt } from '../core/domain.js';
 import {
-  renderDosePrompt, renderMealPrompt, renderSleepPrompt, renderWakePrompt,
+  renderBedtimePrompt, renderDosePrompt, renderMealPrompt, renderSleepPrompt, renderWakePrompt,
 } from '../core/render.js';
 import type { Rendered } from '../core/render.js';
 import type { Db } from '../io/db.js';
@@ -75,7 +75,11 @@ function renderFor(
     case 'wake':
       return renderWakePrompt(prompt.nudgeCount, forCaregiver, name);
     case 'sleep':
-      return renderSleepPrompt(forCaregiver, name);
+      return prompt.body.bedStage === undefined
+        ? renderSleepPrompt(forCaregiver, name)
+        : renderBedtimePrompt(
+            prompt.body.proposedAt ?? now, prompt.body.beforeBed ?? [], forCaregiver, name, z,
+          );
     case 'meal':
       return renderMealPrompt(
         prompt.body.meal ?? 'a meal', forCaregiver, name,

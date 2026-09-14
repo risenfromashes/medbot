@@ -249,6 +249,24 @@ export interface Patient {
    * authority; this only governs what the bot is allowed to assume.
    */
   minSleepMs: number;
+  /**
+   * Tonight's bedtime as currently understood -- the reference time to begin with, then
+   * whatever the patient last said when asked. Null before the day's first tick.
+   *
+   * This, not `presumedSleepAt`, is what the evening is planned around. The wall time is
+   * where the negotiation starts; this is where it has got to.
+   */
+  expectedSleepAt: number | null;
+  /** While asleep: the earliest the bot will start asking whether they are up. */
+  expectedWakeAt: number | null;
+  lastWakeCheckAt: number | null;
+  /** Leads for the two "still turning in?" prompts before the expected bedtime. */
+  bedLeadFirstMs: number;
+  bedLeadSecondMs: number;
+  /** How long outstanding reminders keep going after the expected bedtime. */
+  postBedGraceMs: number;
+  /** How often to ask whether they are up, once the minimum sleep has elapsed. */
+  wakeCheckEveryMs: number;
   wakeState: WakeState;
   wakeConfidence: WakeConfidence;
   wakeStateSince: number;
@@ -316,7 +334,18 @@ export interface MealEvent {
 // Prompts
 // ---------------------------------------------------------------------------
 
-export type PromptKind = 'dose' | 'wake' | 'sleep' | 'meal' | 'info';
+export type PromptKind =
+  | 'dose'
+  | 'meal'
+  | 'info'
+  /** "Are you up?" -- the periodic check, and the one triggered by late-night activity. */
+  | 'wake'
+  /**
+   * Bedtime. With `bedStage` on the body it is the negotiation -- "still turning in at
+   * one? sleep now / -30 / on time / +30 / +1h" -- and without it, the older bare
+   * "heading to bed?", which open rows from before the change still carry.
+   */
+  | 'sleep';
 export type PromptState = 'open' | 'resolved' | 'expired' | 'cancelled';
 
 export interface PromptBody {
@@ -332,6 +361,13 @@ export interface PromptBody {
   stage?: 'plan' | 'confirm';
   /** The time being proposed, so the question can name it rather than ask openly. */
   proposedAt?: number;
+  /**
+   * Which of the two pre-bed questions this is. Its presence is also what marks a sleep
+   * prompt as the negotiated kind rather than the old bare one.
+   */
+  bedStage?: 'first' | 'second';
+  /** Medicines worth taking before bed, named in the bedtime prompt. */
+  beforeBed?: Array<{ doseId: number; label: string; at: number }>;
   /** For a dose prompt tied to an upcoming meal, so the message can say why. */
   beforeMeal?: { meal: string; inMs: number };
   text?: string;
@@ -380,6 +416,10 @@ export type TempId = number;
 
 export type Action =
   | { t: 'setWake'; state: WakeState; confidence: WakeConfidence; at: number; source: string }
+  /** Move tonight's expected bedtime, or the estimate of when they will be up. */
+  | { t: 'setExpectedSleep'; at: number | null }
+  | { t: 'setExpectedWake'; at: number | null }
+  | { t: 'markWakeCheck'; at: number }
   | { t: 'rollDay'; localDay: LocalDay }
   | {
       t: 'createDose';
@@ -409,6 +449,7 @@ export type Action =
   | { t: 'nudgePrompt'; promptId: number; at: number }
   | { t: 'escalatePrompt'; promptId: number; tier: number; at: number }
   | { t: 'closePrompt'; promptId: number; state: PromptState; at: number }
+  | { t: 'setPromptBody'; promptId: number; body: PromptBody }
   | {
       t: 'recordMeal';
       meal: string;

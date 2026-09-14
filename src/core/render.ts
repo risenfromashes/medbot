@@ -135,15 +135,99 @@ export function renderEarlierMenu(doseId: number, z: Zone, now: number): Rendere
   };
 }
 
+/**
+ * "Did you just wake up?"
+ *
+ * Never "good morning, here is your day" -- the bot does not know when they got up, and
+ * starting the schedule from the wrong moment misplaces every dose in it. The one answer
+ * that matters most is the second: people surface, potter about, and only reach for the
+ * phone an hour later.
+ */
 export function renderWakePrompt(nudge: number, forCaregiver: boolean, patientName: string): Rendered {
-  const text = forCaregiver
-    ? `☀️ ${esc(patientName)} hasn't confirmed being awake yet — today's medicines are waiting on it.`
-    : nudge === 0
-      ? "☀️ <b>Good morning!</b> Are you up?\nI'll start today's medicine schedule as soon as you say so."
-      : "☀️ Still asleep? Tap below whenever you're up and I'll start the day.";
+  if (forCaregiver) {
+    return {
+      text: `☀️ ${esc(patientName)} hasn't said whether they're up — today's medicines are waiting on it.`,
+      buttons: [],
+    };
+  }
   return {
-    text,
-    buttons: [[{ text: "☀️ I'm awake", callback_data: encodeCallback({ a: 'wake' }) }]],
+    text:
+      nudge === 0
+        ? '☀️ <b>Did you just wake up?</b>\n\n<i>I\'ll start the day from whenever you actually got up, so the times come out right.</i>'
+        : "☀️ Still there? Tell me when you got up and I'll pick the day up from then.",
+    buttons: [
+      [{ text: '☀️ Yes, just now', callback_data: encodeCallback({ a: 'wokeNow' }) }],
+      [{ text: '🕐 I woke up earlier', callback_data: encodeCallback({ a: 'wokeEarlier' }) }],
+      [
+        { text: '😴 +30 min', callback_data: encodeCallback({ a: 'sleepOn', minutes: 30 }) },
+        { text: '😴 +1 hour', callback_data: encodeCallback({ a: 'sleepOn', minutes: 60 }) },
+      ],
+      [{ text: '🌙 Going back to sleep', callback_data: encodeCallback({ a: 'sleepOn', minutes: 120 }) }],
+    ],
+  };
+}
+
+/** "Roughly when?" -- the follow-up to "I woke up earlier". */
+export function renderWokeEarlierMenu(now: number, z: Zone): Rendered {
+  const choices = [30, 60, 90, 120, 180, 240];
+  const rows: InlineButton[][] = [];
+  for (let i = 0; i < choices.length; i += 2) {
+    rows.push(
+      choices.slice(i, i + 2).map((m) => ({
+        text: `${fmtDuration(m * MINUTE)} ago (${z.fmtTime12(now - m * MINUTE)})`,
+        callback_data: encodeCallback({ a: 'wokeAgo', minutesAgo: m }),
+      })),
+    );
+  }
+  rows.push([{ text: '☀️ Actually, just now', callback_data: encodeCallback({ a: 'wokeNow' }) }]);
+  return {
+    text:
+      '🕐 <b>Roughly when did you get up?</b>\n\n' +
+      "<i>Or just tell me: <code>/awake 7:30am</code>. I'll work out what was due since then.</i>",
+    buttons: rows,
+  };
+}
+
+/**
+ * "Still turning in at one?"
+ *
+ * Asked twice before the expected bedtime, because the answer decides what happens to
+ * every dose that would otherwise fall the wrong side of it. The medicines worth taking
+ * before bed are listed here rather than left to arrive separately: this is the moment
+ * someone is thinking about going to sleep, and the last one at which "before bed" still
+ * means anything.
+ */
+export function renderBedtimePrompt(
+  proposedAt: number,
+  beforeBed: Array<{ label: string }>,
+  forCaregiver: boolean,
+  patientName: string,
+  z: Zone,
+): Rendered {
+  const when = z.fmtTime12(proposedAt);
+  const list = beforeBed.length === 0
+    ? ''
+    : `\n\n<b>Before you turn in</b>\n${beforeBed.map((b) => `• ${esc(b.label)}`).join('\n')}`;
+
+  if (forCaregiver) {
+    return {
+      text: `🌙 ${esc(patientName)} is expected to turn in around ${when}.${list}`,
+      buttons: [],
+    };
+  }
+  return {
+    text: `🌙 <b>Still turning in around ${when}?</b>${list}`,
+    buttons: [
+      [{ text: '🌙 Going to sleep now', callback_data: encodeCallback({ a: 'bedNow' }) }],
+      [
+        { text: '−30 min', callback_data: encodeCallback({ a: 'bedAt', shiftMinutes: -30 }) },
+        { text: '✅ On time', callback_data: encodeCallback({ a: 'bedAt', shiftMinutes: 0 }) },
+      ],
+      [
+        { text: '+30 min', callback_data: encodeCallback({ a: 'bedAt', shiftMinutes: 30 }) },
+        { text: '+1 hour', callback_data: encodeCallback({ a: 'bedAt', shiftMinutes: 60 }) },
+      ],
+    ],
   };
 }
 

@@ -9,7 +9,7 @@
  * uncertain state is bounded by a clock time that resolves it without any input.
  */
 
-import type { Action, PatientState, WakeConfidence, WakeState } from './domain.js';
+import type { Action, PatientState, PromptKind, WakeConfidence, WakeState } from './domain.js';
 import type { LocalDay, Zone } from './tz.js';
 import { HOUR, MINUTE } from './tz.js';
 
@@ -20,13 +20,12 @@ export interface WakeFacts {
   wakeAnchor: number;
   /** When the planner next wants to look at the day state. */
   wakeAt: number | null;
+  /** Tonight's expected bedtime while awake, so the day can be planned around it. */
+  expectedSleepAt: number | null;
   /** While asleep: when sleep began, and the earliest the bot may assume it has ended. */
   asleepSince: number | null;
   earliestWake: number | null;
 }
-
-/** How often to re-ask an unanswered wake or sleep question. */
-const POLL_INTERVAL = 30 * MINUTE;
 
 /**
  * How long after going to bed an ordinary message stops counting as "I'm up".
@@ -58,28 +57,22 @@ export function planWake(
   z: Zone,
   today: LocalDay,
   emit: (a: Action) => void,
-  hasOpenPrompt: (kind: 'wake' | 'sleep') => boolean,
-  openPromptId: (kind: 'wake' | 'sleep') => number | null,
+  hasOpenPrompt: (kind: PromptKind) => boolean,
+  openPromptIds: (kind: PromptKind) => number[],
+  hasBedPrompt: (stage: 'first' | 'second') => boolean,
 ): WakeFacts {
   const p = state.patient;
   let wakeState: WakeState = p.wakeState;
   let confidence: WakeConfidence = p.wakeConfidence;
   let anchor = p.lastWakeAt ?? p.wakeStateSince;
-  // The state machine can change state within a single call -- inferred awake, then the
-  // evening checks below. Those must see the state as it now is. Reading the stored
-  // wakeStateSince instead meant that waking up after the presumed-sleep wall time put
-  // the patient straight back to sleep in the same tick: "I'm up" at 07:00 was undone
-  // because 01:00 was still, technically, after last night's bedtime.
+  /** Tonight's bedtime as it now stands, for the rest of the planner to schedule around. */
+  let bedAt: number | null = null;
+  // The state machine can change state within this call, and everything downstream needs
+  // the instant it just set rather than the one it was loaded with. The grace hour after
+  // bedtime is measured from here, so reading the stale value meant the hour had already
+  // expired on the very tick sleep began.
   let stateSince = p.wakeStateSince;
 
-  // These are resolved as "the most recent occurrence of this wall time", rather than
-  // being pinned to today's calendar date, so the logic behaves correctly across
-  // midnight -- a 01:30 presumed-sleep time belongs to the night that is still running,
-  // not to the morning that has just started.
-  const lastMorning = z.lastWallAtOrBefore(p.morningPollAt, now);
-  const lastPresumedWake = z.lastWallAtOrBefore(p.presumedWakeAt, now);
-  const lastEvening = z.lastWallAtOrBefore(p.eveningPollAt, now);
-  const lastPresumedSleep = z.lastWallAtOrBefore(p.presumedSleepAt, now);
 
   const wakeUps: (number | null)[] = [];
 
@@ -89,8 +82,14 @@ export function planWake(
     stateSince = at;
     if (s === 'awake') anchor = at;
     emit({ t: 'setWake', state: s, confidence: c, at, source });
-    const stale = openPromptId(s === 'awake' ? 'wake' : 'sleep');
-    if (stale !== null) emit({ t: 'closePrompt', promptId: stale, state: 'resolved', at: now });
+    // All of them, not the first found: two bedtime questions can be open at once -- the
+    // hour-before and the half-hour-before -- and leaving one behind meant it nagged
+    // through the night about a bedtime that had already happened.
+    for (const kind of s === 'awake' ? (['wake'] as const) : (['sleep'] as const)) {
+      for (const stale of openPromptIds(kind)) {
+        emit({ t: 'closePrompt', promptId: stale, state: 'resolved', at: now });
+      }
+    }
   };
 
   // Sleep has a minimum length, and the clock is not allowed to end it early. Someone who
@@ -99,93 +98,96 @@ export function planWake(
   const sleepFloor = p.wakeStateSince + p.minSleepMs;
   const settled = p.wakeStateSince + SETTLING_PERIOD;
 
-  // The two morning times, held back by the minimum. Asking still comes before assuming:
-  // a late night should be met with "awake?" and half an hour's grace, not with the whole
-  // day's dosing arriving unannounced the moment the minimum runs out.
-  const morningAt = Math.max(lastMorning, sleepFloor);
-  const presumeAt = Math.max(lastPresumedWake, sleepFloor + POLL_INTERVAL);
-
-  // Is it daytime for this patient right now? The last boundary crossed was the morning
-  // poll rather than the evening one. This, not the bare clock, is what separates getting
-  // up from being awake at three in the morning -- and it works for an afternoon nap,
-  // which has no morning to wait for and would otherwise silence every reminder until
-  // tomorrow, the exact quiet this system exists to prevent.
-  const daytime = lastMorning > lastEvening;
 
   if (wakeState === 'asleep') {
-    // (a) Anything the patient sent the bot proves they are up -- once they have been
-    //     down long enough for it to mean that, and once the night is actually over.
-    if (
-      p.lastActivityAt !== null &&
-      p.lastActivityAt > settled &&
-      p.lastActivityAt > p.wakeStateSince &&
-      daytime
-    ) {
-      setState('awake', 'inferred', p.lastActivityAt, 'activity');
-    }
-    // (b) The clock passed the fallback and nobody said otherwise. Dose anyway. The
-    //     anchor is the fallback time, not now, so a late tick does not shift the day --
-    //     unless the minimum sleep pushed it later, in which case the day starts there.
-    else if (now >= presumeAt && lastPresumedWake > p.wakeStateSince) {
-      setState('awake', 'presumed', presumeAt, 'presumed');
-      emit({
-        t: 'note',
-        kind: 'presumed_wake',
-        detail: { at: presumeAt },
-      });
-    }
-    // (c) Morning has arrived but the fallback has not. Ask, and keep asking.
-    else if (now >= morningAt && lastMorning > p.wakeStateSince) {
-      if (!hasOpenPrompt('wake')) {
-        emit({ t: 'createPrompt', id: 0, kind: 'wake', body: { kind: 'wake', doseIds: [] }, tier: 0 });
+    // --- night ------------------------------------------------------------
+    //
+    // Waking is never assumed from the clock. The configured morning time says where to
+    // start asking, nothing more: a patient who sleeps in is not dosed at nine because
+    // nine has arrived, and one who is up at five is not left waiting for it. Until the
+    // minimum sleep has elapsed the bot is simply quiet; after that it asks, and keeps
+    // asking, escalating to whoever backs them up if the asking goes unanswered.
+    //
+    // Two floors, and the morning reference is the important one: "after the minimum
+    // sleep" on its own would start asking at three in the morning for anyone who went to
+    // bed at eleven. The configured morning time says where asking may begin -- it never
+    // says they are up.
+    const morningRef = z.nextWallAtOrAfter(p.morningPollAt, p.wakeStateSince);
+    const askFrom = Math.max(sleepFloor, morningRef, p.expectedWakeAt ?? 0);
+
+    // Anything they do after a full night's sleep is evidence, not proof. It earns a
+    // question -- "did you just wake up?" -- rather than a decision, because the answer
+    // is often "hours ago", and starting the day from the wrong moment misplaces every
+    // dose in it.
+    const stirred = p.lastActivityAt !== null && p.lastActivityAt >= sleepFloor && p.lastActivityAt > p.wakeStateSince;
+
+    if (now >= askFrom || stirred) {
+      const open = openPromptIds('wake')[0] ?? null;
+      const due = p.lastWakeCheckAt === null || now >= p.lastWakeCheckAt + p.wakeCheckEveryMs;
+      if (open === null && (now >= askFrom || stirred) && (due || stirred)) {
+        emit({
+          t: 'createPrompt', id: 0, kind: 'wake', tier: 0,
+          body: { kind: 'wake', doseIds: [], proposedAt: p.wakeStateSince },
+        });
+        emit({ t: 'markWakeCheck', at: now });
       }
-      push(wakeUps, now + POLL_INTERVAL);
-      push(wakeUps, presumeAt);
-    }
-    // (d) Still night, or not yet slept long enough. Come back when that changes.
-    else {
-      push(wakeUps, morningAt > now ? morningAt : null);
-      push(wakeUps, presumeAt > now ? presumeAt : null);
+      push(wakeUps, (p.lastWakeCheckAt ?? now) + p.wakeCheckEveryMs);
+    } else {
+      push(wakeUps, askFrom);
       push(wakeUps, settled > now ? settled : null);
-      push(wakeUps, z.nextWallAtOrAfter(p.morningPollAt, now));
-      push(wakeUps, z.nextWallAtOrAfter(p.presumedWakeAt, now));
     }
   }
 
   if (wakeState === 'awake') {
-    // (e) Past the presumed-sleep time with no word: treat as asleep. This only suppresses
-    //     non-critical awake-only medicines, so presuming wrongly here costs a delayed
-    //     reminder, never a missed critical one.
-    if (now >= lastPresumedSleep && lastPresumedSleep > stateSince) {
-      // Unless they are still plainly up. Anything they have done since the cutoff buys
-      // another three-quarters of an hour, so the day ends when they stop, not when the
-      // clock says it ought to have.
-      // Recent activity, full stop -- not "activity after the cutoff". Someone who
-      // answered a reminder at 22:59 has not gone to bed by 23:00, and a minute either
-      // side of an arbitrary wall time should not decide the question.
+    // --- evening ----------------------------------------------------------
+    //
+    // Bedtime is a negotiation, not a wall time. The configured hour is where tonight's
+    // expectation starts; two prompts before it ask whether it still holds, and every
+    // "+1 hour" moves it and restarts the same logic against the new time.
+    const referenceBed = z.nextWallAtOrAfter(p.presumedSleepAt, Math.max(anchor, now - 18 * HOUR));
+    const expectedBed =
+      p.expectedSleepAt !== null && p.expectedSleepAt > anchor ? p.expectedSleepAt : referenceBed;
+    if (p.expectedSleepAt !== expectedBed) emit({ t: 'setExpectedSleep', at: expectedBed });
+    bedAt = expectedBed;
+
+    if (now >= expectedBed) {
+      // Bedtime has arrived and nothing has moved it. Sleep is assumed -- but the grace
+      // period keeps outstanding reminders alive, so a dose still hanging at ten past one
+      // is chased rather than parked, and anything the patient does in that hour reopens
+      // the question.
       const stillUp = p.lastActivityAt !== null && now < p.lastActivityAt + STILL_UP_GRACE;
       if (stillUp) {
         push(wakeUps, p.lastActivityAt! + STILL_UP_GRACE);
       } else {
-        // Date the sleep from when they actually went quiet, not from the wall time they
-        // were demonstrably awake through.
-        const at = p.lastActivityAt !== null && p.lastActivityAt > lastPresumedSleep
-          ? p.lastActivityAt
-          : lastPresumedSleep;
+        const at = p.lastActivityAt !== null && p.lastActivityAt > expectedBed ? p.lastActivityAt : expectedBed;
         setState('asleep', 'presumed', at, 'presumed');
-        push(wakeUps, z.nextWallAtOrAfter(p.morningPollAt, now));
+        emit({ t: 'setExpectedSleep', at: null });
+        emit({ t: 'setExpectedWake', at: at + p.minSleepMs });
+        push(wakeUps, at + p.minSleepMs);
       }
-    }
-    // (f) Evening: ask whether they have turned in.
-    else if (now >= lastEvening && lastEvening > stateSince) {
-      if (!hasOpenPrompt('sleep')) {
-        emit({ t: 'createPrompt', id: 0, kind: 'sleep', body: { kind: 'sleep', doseIds: [] }, tier: 0 });
-      }
-      push(wakeUps, now + POLL_INTERVAL);
-      push(wakeUps, z.nextWallAtOrAfter(p.presumedSleepAt, now));
     } else {
-      push(wakeUps, z.nextWallAtOrAfter(p.eveningPollAt, now));
-      push(wakeUps, z.nextWallAtOrAfter(p.presumedSleepAt, now));
+      // The two "still turning in?" prompts. The second only goes out if the first went
+      // unanswered, and both name the time they are asking about so a tap is enough.
+      const firstAt = expectedBed - p.bedLeadFirstMs;
+      const secondAt = expectedBed - p.bedLeadSecondMs;
+      const stage: 'first' | 'second' | null =
+        now >= secondAt ? 'second' : now >= firstAt ? 'first' : null;
+
+      if (stage !== null && !hasBedPrompt(stage)) {
+        // The half-hour question replaces the hour one rather than piling on top of it.
+        if (stage === 'second') {
+          for (const stale of openPromptIds('sleep')) {
+            emit({ t: 'closePrompt', promptId: stale, state: 'expired', at: now });
+          }
+        }
+        emit({
+          t: 'createPrompt', id: 0, kind: 'sleep', tier: 0,
+          body: { kind: 'sleep', doseIds: [], proposedAt: expectedBed, bedStage: stage },
+        });
+      }
+      push(wakeUps, firstAt > now ? firstAt : null);
+      push(wakeUps, secondAt > now ? secondAt : null);
+      push(wakeUps, expectedBed);
     }
   }
 
@@ -195,7 +197,8 @@ export function planWake(
     confidence,
     wakeAnchor: anchor,
     wakeAt: future.length > 0 ? Math.min(...future) : null,
-    asleepSince: wakeState === 'asleep' ? p.wakeStateSince : null,
+    expectedSleepAt: bedAt,
+    asleepSince: wakeState === 'asleep' ? stateSince : null,
     // What the schedule should treat as "the morning": no earlier than the minimum sleep,
     // and no earlier than the time the patient is normally asked about.
     earliestWake:

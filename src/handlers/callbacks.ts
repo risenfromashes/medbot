@@ -9,14 +9,17 @@
  */
 
 import { decodeCallback } from '../core/callbackCodec.js';
-import { renderConfirmation, renderEarlierMenu } from '../core/render.js';
+import { renderConfirmation, renderEarlierMenu, renderWokeEarlierMenu } from '../core/render.js';
 import { HOUR, MINUTE, fmtDuration, zoneFor } from '../core/tz.js';
 import { parseDuration } from '../core/timeparse.js';
 import { dosesPerDayInterval } from '../core/prescription.js';
 import { Db } from '../io/db.js';
 import { Telegram, esc } from '../io/telegram.js';
 import { broadcast, clearPromptMessages } from './dispatch.js';
-import { applyImport, bedtimeButtons, editMenuFor, forceSleep, goodnightMessage, resolveBedtime } from './commands.js';
+import {
+  actingFor, applyImport, bedtimeButtons, editMenuFor, forceSleep, goodnightMessage,
+  noteSpacedNeighbours, offerMissedSince, resolveBedtime,
+} from './commands.js';
 import type { CmdCtx } from './commands.js';
 import type { Env, TgCallbackQuery } from '../types.js';
 
@@ -189,6 +192,108 @@ export async function handleCallback(
     return;
   }
 
+  // --- the evening negotiation ----------------------------------------------
+  if (cb.a === 'bedNow' || cb.a === 'bedAt' || cb.a === 'wokeNow' || cb.a === 'wokeEarlier'
+      || cb.a === 'wokeAgo' || cb.a === 'sleepOn') {
+    const acting = await actingFor(ctx);
+    if (acting === null) {
+      await ack('I need to know who you are first — send /start.', true);
+      return;
+    }
+    const { patient, z } = acting;
+
+    const closeKind = async (kind: 'wake' | 'sleep'): Promise<void> => {
+      for (const prompt of await db.openPromptsFor(patient.id)) {
+        if (prompt.kind !== kind) continue;
+        await db.closePrompt(prompt.id, 'resolved', now);
+        await clearPromptMessages({ db, tg, z, now }, prompt.id);
+      }
+    };
+
+    if (cb.a === 'bedNow') {
+      await ack('Goodnight.');
+      await closeKind('sleep');
+      await db.setWake(patient.id, 'asleep', now, z.localDay(now), 'button', chatId);
+      await tg.sendMessage(chatId, await goodnightMessage(ctx, patient.id), {
+        replyMarkup: { inline_keyboard: bedtimeButtons() },
+      });
+      return;
+    }
+
+    if (cb.a === 'bedAt') {
+      // Every shift restarts the same two prompts against the new time, so a patient can
+      // push bedtime back all evening and the bot keeps up rather than giving up.
+      const current = patient.expectedSleepAt ?? z.nextWallAtOrAfter(patient.presumedSleepAt, now);
+      const moved = current + cb.shiftMinutes * MINUTE;
+      await db.setExpectedSleep(patient.id, moved, now);
+      await closeKind('sleep');
+      await ack(cb.shiftMinutes === 0 ? 'Noted.' : 'Moved.');
+      await tg.sendMessage(
+        chatId,
+        cb.shiftMinutes === 0
+          ? `🌙 Right — I'll take ${z.fmtTime12(moved)} as bedtime and fit everything in before it.`
+          : `🌙 Bedtime moved to <b>${z.fmtTime12(moved)}</b>. I'll check in again before then.`,
+      );
+      return;
+    }
+
+    if (cb.a === 'sleepOn') {
+      await closeKind('wake');
+      await db.setExpectedWake(patient.id, now + cb.minutes * MINUTE, now);
+      await ack('Sleep well.');
+      await tg.sendMessage(
+        chatId,
+        `😴 Right — I'll leave you be and check again around <b>${z.fmtTime12(now + cb.minutes * MINUTE)}</b>.`,
+      );
+      return;
+    }
+
+    if (cb.a === 'wokeEarlier') {
+      await ack();
+      const menu = renderWokeEarlierMenu(now, z);
+      await tg.sendMessage(chatId, menu.text, { replyMarkup: { inline_keyboard: menu.buttons } });
+      return;
+    }
+
+    // "Just now" or "N ago": the day starts from the stated moment, and everything that
+    // was due between then and now is offered back rather than quietly written off.
+    const wokeAt = cb.a === 'wokeNow' ? now : now - cb.minutesAgo * MINUTE;
+    await closeKind('wake');
+    await db.setWake(patient.id, 'awake', wokeAt, z.localDay(wokeAt), 'button', chatId);
+    await ack('Good morning!');
+    await tg.sendMessage(
+      chatId,
+      wokeAt >= now - MINUTE
+        ? "☀️ Good morning. Starting today's schedule."
+        : `☀️ Good morning — starting the day from <b>${z.fmtTime12(wokeAt)}</b>.`,
+    );
+    await offerMissedSince(ctx, patient.id, wokeAt);
+    return;
+  }
+
+  // "Actually I did take that one" against a dose reconstructed as missed.
+  if (cb.a === 'tookPast') {
+    const acting = await actingFor(ctx);
+    if (acting === null) {
+      await ack();
+      return;
+    }
+    const dose = await db.getDose(cb.doseId);
+    if (dose === null || dose.patientId !== acting.patient.id) {
+      await ack('That one is no longer on the list.');
+      return;
+    }
+    const fixed = await db.correctDose(cb.doseId, chatId, dose.plannedDueAt, now);
+    await ack(fixed === null ? 'Already recorded.' : 'Recorded.');
+    if (fixed !== null) {
+      await tg.sendMessage(
+        chatId,
+        renderConfirmation(fixed.med.name, dose.plannedDueAt, acting.z, userName, true),
+      );
+    }
+    return;
+  }
+
   // --- going to bed with things outstanding --------------------------------
   if (cb.a === 'sleepAnyway') {
     await ack('Goodnight.');
@@ -337,6 +442,9 @@ export async function handleCallback(
         ? `⏭ <b>${esc(label)}</b> — skipped${chats.length > 1 ? ` by ${esc(userName)}` : ''}`
         : renderConfirmation(label, takenAt, z, chats.length > 1 ? userName : null, cb.a === 'earlier');
     await broadcast(dctx, chats, line);
+    if (status === 'taken' && cb.a !== 'earlier' && med !== null) {
+      await noteSpacedNeighbours(ctx, patient.id, med, takenAt);
+    }
     return;
   }
 

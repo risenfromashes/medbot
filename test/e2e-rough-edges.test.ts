@@ -132,7 +132,7 @@ describe('someone with nothing to take', () => {
     await bot.tap(PATIENT, /turning in/i).catch(() => undefined);
     bot.clear();
     await bot.run(26 * 3600_000, 10 * 60_000);
-    expect(bot.textsTo(PATIENT).join('\n')).toMatch(/awake|Moxifloxacin|morning/i);
+    expect(bot.textsTo(PATIENT).join('\n')).toMatch(/wake up|awake|Moxifloxacin|morning/i);
   });
 });
 

@@ -443,6 +443,26 @@ export class Db {
           rest.push(this.d1.prepare('UPDATE patients SET last_watchdog_at = ?2 WHERE id = ?1').bind(pid, a.at));
           break;
 
+        case 'setExpectedSleep':
+          rest.push(this.d1.prepare('UPDATE patients SET expected_sleep_at = ?2 WHERE id = ?1').bind(pid, a.at));
+          break;
+
+        case 'setExpectedWake':
+          rest.push(this.d1.prepare('UPDATE patients SET expected_wake_at = ?2 WHERE id = ?1').bind(pid, a.at));
+          break;
+
+        case 'setPromptBody':
+          rest.push(
+            this.d1
+              .prepare('UPDATE prompts SET body_json = ?2 WHERE id = ?1')
+              .bind(a.promptId, JSON.stringify(a.body)),
+          );
+          break;
+
+        case 'markWakeCheck':
+          rest.push(this.d1.prepare('UPDATE patients SET last_wake_check_at = ?2 WHERE id = ?1').bind(pid, a.at));
+          break;
+
         case 'sendInfo':
           // Dispatched separately; recorded here so the digest and any watchdog alert
           // appear in the medical record alongside everything else.
@@ -1187,6 +1207,68 @@ export class Db {
     ]);
   }
 
+  /** Move tonight's bedtime, and wake the planner so it re-plans against the new one. */
+  async setExpectedSleep(patientId: number, at: number | null, now: number): Promise<void> {
+    await this.d1
+      .prepare('UPDATE patients SET expected_sleep_at = ?2, next_action_at = ?3 WHERE id = ?1')
+      .bind(patientId, at, now)
+      .run();
+  }
+
+  /** Push back when the bot will next ask whether they are up. */
+  async setExpectedWake(patientId: number, at: number | null, now: number): Promise<void> {
+    await this.d1
+      .prepare(
+        'UPDATE patients SET expected_wake_at = ?2, last_wake_check_at = ?3, next_action_at = ?2 WHERE id = ?1',
+      )
+      .bind(patientId, at, now)
+      .run();
+  }
+
+  /**
+   * Write back the doses that should have happened while nobody was logging.
+   *
+   * Someone who got up at seven and only reaches for their phone at eleven has had four
+   * hours of doses either taken-and-unlogged or genuinely missed. Leaving that as a hole
+   * is the worst of both: the adherence record is wrong, and the schedule carries on from
+   * a cycle that never started. They go in as missed -- the honest default -- and each one
+   * comes back with a button to say otherwise.
+   */
+  async reconstructMissed(
+    med: Medicine,
+    patientId: number,
+    times: number[],
+    localDayOf: (at: number) => string,
+    now: number,
+  ): Promise<Array<{ id: number; at: number }>> {
+    if (times.length === 0) return [];
+    const made: Array<{ id: number; at: number }> = [];
+    let seq = med.nextSeq;
+    for (const at of times) {
+      const res = await this.d1
+        .prepare(
+          `INSERT INTO doses (patient_id, med_id, seq, step, local_day, planned_due_at,
+             effective_due_at, anchor_kind, status, resolved_at, resolution_src, created_at)
+           VALUES (?1,?2,?3,0,?4,?5,?5,'wake','missed',?6,'reconstructed',?6)`,
+        )
+        .bind(patientId, med.id, seq, localDayOf(at), at, now)
+        .run();
+      made.push({ id: num(res.meta.last_row_id), at });
+      seq++;
+    }
+    const last = times[times.length - 1]!;
+    await this.d1
+      .prepare(
+        `UPDATE medications SET next_seq = ?2, doses_missed = doses_missed + ?3,
+           last_cycle_start_at = ?4, last_planned_due_at = ?4,
+           started_at = COALESCE(started_at, ?5)
+         WHERE id = ?1`,
+      )
+      .bind(med.id, seq, times.length, last, times[0]!)
+      .run();
+    return made;
+  }
+
   // --- prescriptions ------------------------------------------------------
 
   async stageePrescription(
@@ -1543,6 +1625,13 @@ function rowToPatient(r: Row): Patient {
     quietStart: strOrNull(r['quiet_start']),
     quietEnd: strOrNull(r['quiet_end']),
     minSleepMs: numOrNull(r['min_sleep_ms']) ?? 4 * 3_600_000,
+    expectedSleepAt: numOrNull(r['expected_sleep_at']),
+    expectedWakeAt: numOrNull(r['expected_wake_at']),
+    lastWakeCheckAt: numOrNull(r['last_wake_check_at']),
+    bedLeadFirstMs: numOrNull(r['bed_lead_first_ms']) ?? 3_600_000,
+    bedLeadSecondMs: numOrNull(r['bed_lead_second_ms']) ?? 1_800_000,
+    postBedGraceMs: numOrNull(r['post_bed_grace_ms']) ?? 3_600_000,
+    wakeCheckEveryMs: numOrNull(r['wake_check_every_ms']) ?? 3_600_000,
     wakeState: str(r['wake_state']) as Patient['wakeState'],
     wakeConfidence: str(r['wake_confidence']) as Patient['wakeConfidence'],
     wakeStateSince: num(r['wake_state_since']),

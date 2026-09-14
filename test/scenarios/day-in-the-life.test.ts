@@ -82,9 +82,10 @@ describe('waking at noon', () => {
     }
 
     expect(taken.length, 'the two-hourly drop never fired after waking at noon').toBeGreaterThanOrEqual(4);
-    // First dose right after waking, then roughly every two hours.
+    // First dose right after waking -- within the spacing group's stagger, since all
+    // three drops start from the same moment and must be ten minutes apart.
     expect(taken[0]).toBeGreaterThanOrEqual(at(0, '12:00'));
-    expect(taken[0]).toBeLessThanOrEqual(at(0, '12:10'));
+    expect(taken[0]).toBeLessThanOrEqual(at(0, '12:30'));
     for (let i = 1; i < taken.length; i++) {
       const gap = taken[i]! - taken[i - 1]!;
       expect(gap, `two-hourly drop fired ${Math.round(gap / MINUTE)}min apart`).toBeGreaterThanOrEqual(110 * MINUTE);
@@ -230,11 +231,13 @@ describe('the questions it asks, beyond medicines', () => {
     const w = newDay({ start: at(0, '21:00') });
     w.now = at(0, '21:00');
     w.declare('wake');
-    w.run(3 * HOUR); // past the 22:30 evening poll
+    w.run(4 * HOUR); // up to the 00:30 question, an hour before the 01:30 bedtime
 
+    // Bedtime is negotiated rather than announced: the question comes an hour before the
+    // expected hour, not after it, so there is still time to move it.
     const sleepAsks = w.sent.filter((s) => s.kind === 'sleep');
-    expect(sleepAsks.length, 'never asked whether she had turned in').toBeGreaterThan(0);
-    expect(sleepAsks[0]!.at).toBeGreaterThanOrEqual(at(0, '22:30'));
+    expect(sleepAsks.length, 'never asked whether she was still turning in').toBeGreaterThan(0);
+    expect(sleepAsks[0]!.at).toBeLessThanOrEqual(at(1, '01:30'));
   });
 
   it('reminds about the before-meal tablet separately from the after-meal one', () => {

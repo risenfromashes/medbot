@@ -19,6 +19,18 @@ export type Callback =
   | { a: 'bedtime'; choice: 'took' | 'skip' | 'leave' }
   /** "Yes, I really am going to bed" -- overriding the too-soon-to-sleep guard. */
   | { a: 'sleepAnyway' }
+  /** Answering "still turning in at one?": now, or a shift in minutes (0 = on time). */
+  | { a: 'bedAt'; shiftMinutes: number }
+  | { a: 'bedNow' }
+  /** Answering "did you just wake up?" */
+  | { a: 'wokeNow' }
+  | { a: 'wokeEarlier' }
+  /** How long ago they actually woke, from the follow-up menu. */
+  | { a: 'wokeAgo'; minutesAgo: number }
+  /** Still asleep: push the next check back by this many minutes. */
+  | { a: 'sleepOn'; minutes: number }
+  /** "I did take that one" -- flips a reconstructed missed dose back to taken. */
+  | { a: 'tookPast'; doseId: number }
   | { a: 'ate'; meal: string }
   /** "I'm eating in about N minutes" -- what makes a before-meal dose schedulable. */
   | { a: 'planMeal'; meal: string; inMinutes: number }
@@ -49,6 +61,13 @@ export function encodeCallback(cb: Callback): string {
     case 'sleep': return 'b';
     case 'bedtime': return `B.${cb.choice}`;
     case 'sleepAnyway': return 'Z';
+    case 'bedAt': return `D.${b36(cb.shiftMinutes + 720)}`;
+    case 'bedNow': return 'N';
+    case 'wokeNow': return 'W';
+    case 'wokeEarlier': return 'R';
+    case 'wokeAgo': return `G.${b36(cb.minutesAgo)}`;
+    case 'sleepOn': return `O.${b36(cb.minutes)}`;
+    case 'tookPast': return `P.${b36(cb.doseId)}`;
     case 'ate': return `m.${cb.meal}`;
     case 'planMeal': return `p.${cb.meal}.${b36(cb.inMinutes)}`;
     // Minutes since the epoch, which is nine base-36 characters -- comfortably inside
@@ -84,6 +103,14 @@ export function decodeCallback(data: string): Callback {
         ? { a: 'bedtime', choice: parts[1] }
         : { a: 'noop' };
     case 'Z': return { a: 'sleepAnyway' };
+    // Shifts are stored offset by twelve hours so a negative one still encodes cleanly.
+    case 'D': return Number.isFinite(n(1)) ? { a: 'bedAt', shiftMinutes: n(1) - 720 } : { a: 'noop' };
+    case 'N': return { a: 'bedNow' };
+    case 'W': return { a: 'wokeNow' };
+    case 'R': return { a: 'wokeEarlier' };
+    case 'G': return Number.isFinite(n(1)) ? { a: 'wokeAgo', minutesAgo: Math.max(n(1), 0) } : { a: 'noop' };
+    case 'O': return valid(n(1)) ? { a: 'sleepOn', minutes: n(1) } : { a: 'noop' };
+    case 'P': return valid(n(1)) ? { a: 'tookPast', doseId: n(1) } : { a: 'noop' };
     case 'm': return parts[1] !== undefined ? { a: 'ate', meal: parts[1] } : { a: 'noop' };
     case 'p':
       return parts[1] !== undefined && Number.isFinite(n(2))
