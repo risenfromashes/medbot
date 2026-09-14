@@ -38,6 +38,16 @@ const POLL_INTERVAL = 30 * MINUTE;
  */
 const SETTLING_PERIOD = HOUR;
 
+/**
+ * How long the patient has to be quiet before the clock may call it a night.
+ *
+ * Passing the presumed-sleep time is not evidence of being asleep -- it is evidence of
+ * the time. Someone still answering reminders at half past one is plainly up, and
+ * writing them off as asleep stops their medicines for the rest of the night. The clock
+ * gets the last word, but only once nothing contradicts it.
+ */
+const STILL_UP_GRACE = 45 * MINUTE;
+
 function push(list: (number | null)[], v: number | null): void {
   if (v !== null) list.push(v);
 }
@@ -147,8 +157,24 @@ export function planWake(
     //     non-critical awake-only medicines, so presuming wrongly here costs a delayed
     //     reminder, never a missed critical one.
     if (now >= lastPresumedSleep && lastPresumedSleep > stateSince) {
-      setState('asleep', 'presumed', lastPresumedSleep, 'presumed');
-      push(wakeUps, z.nextWallAtOrAfter(p.morningPollAt, now));
+      // Unless they are still plainly up. Anything they have done since the cutoff buys
+      // another three-quarters of an hour, so the day ends when they stop, not when the
+      // clock says it ought to have.
+      // Recent activity, full stop -- not "activity after the cutoff". Someone who
+      // answered a reminder at 22:59 has not gone to bed by 23:00, and a minute either
+      // side of an arbitrary wall time should not decide the question.
+      const stillUp = p.lastActivityAt !== null && now < p.lastActivityAt + STILL_UP_GRACE;
+      if (stillUp) {
+        push(wakeUps, p.lastActivityAt! + STILL_UP_GRACE);
+      } else {
+        // Date the sleep from when they actually went quiet, not from the wall time they
+        // were demonstrably awake through.
+        const at = p.lastActivityAt !== null && p.lastActivityAt > lastPresumedSleep
+          ? p.lastActivityAt
+          : lastPresumedSleep;
+        setState('asleep', 'presumed', at, 'presumed');
+        push(wakeUps, z.nextWallAtOrAfter(p.morningPollAt, now));
+      }
     }
     // (f) Evening: ask whether they have turned in.
     else if (now >= lastEvening && lastEvening > stateSince) {

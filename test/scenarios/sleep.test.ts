@@ -151,3 +151,83 @@ describe('sleep ends the day', () => {
     expect(live!.effectiveDueAt).toBeLessThanOrEqual(at(0, '11:35'));
   });
 });
+
+/**
+ * The clock does not get to overrule the person.
+ *
+ * "Assumed awake until they say otherwise, or it is past the cutoff *and* there is no
+ * activity." Passing the presumed-sleep time is evidence of the time, not of being
+ * asleep, and treating it as the latter stopped someone's medicines for the rest of a
+ * night they were still very much awake for.
+ */
+describe('being up late', () => {
+  function lateWorld(): World {
+    const w = new World({
+      start: at(0, '22:00'),
+      patient: {
+        morningPollAt: '06:30', presumedWakeAt: '09:00',
+        eveningPollAt: '22:30', presumedSleepAt: '01:00',
+        minSleepMs: 4 * HOUR,
+        wakeState: 'awake', wakeConfidence: 'confirmed',
+        wakeStateSince: at(0, '08:35'), lastWakeAt: at(0, '08:35'),
+        lastActivityAt: at(0, '22:00'),
+      },
+      // Last taken at half past eight, so the next one falls at 01:10 -- ten minutes the
+      // wrong side of a presumed bedtime the patient has not reached yet.
+      meds: [makeMed({
+        id: 1, medKey: 'tab', intervalMs: 4 * HOUR + 40 * MINUTE, minGapMs: 3 * HOUR,
+        spec: { kind: 'interval', intervalMs: 4 * HOUR + 40 * MINUTE, anchor: 'wake' },
+        startedAt: at(0, '08:35'),
+        lastTakenAt: at(0, '20:30'),
+        lastCycleStartAt: at(0, '20:30'),
+        lastPlannedDueAt: at(0, '20:30'),
+        nextSeq: 2,
+      })],
+      chats: [makeChat({ chatId: 100 })],
+    });
+    w.respectSchedule = true;
+    return w;
+  }
+
+  it('does not write off a dose that lands just past the cutoff', () => {
+    // Due at 01:10 against a 01:00 presumed bedtime. Skipping it to the morning assumes
+    // a night that has not started.
+    const w = lateWorld();
+    w.run(30 * MINUTE);
+    const live = w.state.liveDoses.find((d) => d.medId === 1);
+    expect(live, 'the medicine went quiet').toBeDefined();
+    expect(live!.effectiveDueAt, 'pushed to tomorrow morning while the patient is awake')
+      .toBeLessThan(at(1, '06:00'));
+  });
+
+  it('stays awake while they are still answering', () => {
+    const w = lateWorld();
+    for (let i = 0; i < 4 * 60; i++) {
+      w.tick();
+      w.state.patient.lastActivityAt = w.now; // still using the bot
+      w.state.patient.nextActionAt = w.now;
+      w.now += MINUTE;
+    }
+    // 02:00, well past the 01:00 cutoff, and plainly not asleep.
+    expect(w.state.patient.wakeState).toBe('awake');
+  });
+
+  it('calls it a night once they go quiet, dating it from when they stopped', () => {
+    const w = lateWorld();
+    w.state.patient.lastActivityAt = at(0, '23:40');
+    w.run(4 * HOUR); // past 01:00, with nothing since twenty to midnight
+    expect(w.state.patient.wakeState).toBe('asleep');
+    // Not 01:00 on the nose: they were demonstrably up until twenty to midnight.
+    expect(w.state.patient.lastSleepAt ?? w.state.patient.wakeStateSince)
+      .toBeGreaterThanOrEqual(at(0, '23:40'));
+  });
+
+  it('parks an overnight dose rather than prompting for it', () => {
+    const w = lateWorld();
+    w.run(6 * HOUR); // through the night, no activity
+    const live = w.state.liveDoses.find((d) => d.medId === 1);
+    expect(live).toBeDefined();
+    expect(['deferred', 'scheduled']).toContain(live!.status);
+    expect(live!.status, 'nagged someone at three in the morning').not.toBe('prompted');
+  });
+});

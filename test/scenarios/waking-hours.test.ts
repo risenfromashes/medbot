@@ -50,23 +50,49 @@ describe('doses live inside waking hours', () => {
     }
   });
 
-  it('puts the dose that would fall at 2am on the morning instead', () => {
+  it('never asks for a dose in the small hours, and never loses it either', () => {
+    // A dose landing at midnight is not deleted ahead of the fact -- the patient may
+    // still be up. If they are not, it parks the moment it comes due and comes back when
+    // they wake. What must never happen is a prompt at two in the morning, or a medicine
+    // left with nothing live at all.
     const w = dayWorld();
 
-    // Take doses through the evening so the next one would land overnight.
+    for (let i = 0; i < 16 * 60; i++) {
+      w.tick();
+      const pending = w.state.liveDoses.find((d) => d.status === 'prompted' || d.status === 'due');
+      if (pending !== undefined) {
+        const hour = Number(z.fmtTime(w.now).slice(0, 2));
+        expect(hour >= 7 || hour === 0, `asked for a dose at ${z.fmtTime(w.now)}`).toBe(true);
+        w.resolve(pending.id, 'taken');
+      }
+      w.now += MINUTE;
+    }
+
+    const next = w.state.liveDoses[0];
+    expect(next, 'the medicine went quiet overnight').toBeDefined();
+    const hour = Number(z.fmtTime(next!.effectiveDueAt).slice(0, 2));
+    const parked = next!.status === 'deferred';
+    expect(
+      parked || hour >= 7,
+      `next dose sits at ${z.fmtTime(next!.effectiveDueAt)} and is not parked`,
+    ).toBe(true);
+  });
+
+  it('keeps a late-night dose for someone who is plainly still up', () => {
+    // Presumed sleep is 23:00, but they are answering reminders at midnight. Writing the
+    // next dose off to tomorrow morning would be the clock overruling the person.
+    const w = dayWorld();
     for (let i = 0; i < 16 * 60; i++) {
       w.tick();
       const pending = w.state.liveDoses.find((d) => d.status === 'prompted' || d.status === 'due');
       if (pending !== undefined) w.resolve(pending.id, 'taken');
+      // Still messaging the bot -- which is proof of being awake, whatever the hour.
+      w.state.patient.lastActivityAt = w.now;
       w.now += MINUTE;
     }
-    // It is now midnight-ish; whatever is scheduled must not be in the small hours.
+    expect(w.state.patient.wakeState, 'called it a night while they were still typing').toBe('awake');
     const next = w.state.liveDoses[0]!;
-    const hour = Number(z.fmtTime(next.effectiveDueAt).slice(0, 2));
-    expect(
-      hour >= 7,
-      `next dose scheduled at ${z.fmtTime(next.effectiveDueAt)}, in the middle of the night`,
-    ).toBe(true);
+    expect(next.status, 'parked a dose on someone who is awake').not.toBe('deferred');
   });
 
   it('still wakes you for something marked critical', () => {

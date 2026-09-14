@@ -127,6 +127,20 @@ with an explanation: naps need no announcement, the bot simply carries on. Witho
 walks its schedule along with it. There is a button to insist, because a rule that can trap
 someone out of ending their own day is worse than the loop it prevents.
 
+**The clock does not get to overrule the person.** Passing the presumed-sleep time is
+evidence of the time, not of being asleep. Sleep is presumed only once the cutoff has
+passed *and* nothing has been heard for three-quarters of an hour -- and that sleep is
+dated from when they actually went quiet, not from the wall time they were demonstrably
+awake through. Tapping a reminder counts: it used not to, so someone answering every
+prompt by button was written off as asleep on the clock alone.
+
+The same applies to scheduling. A dose landing ten minutes past a presumed bedtime is not
+deleted ahead of the fact -- the patient may well still be up. The night is skipped only
+while they are *actually* asleep; otherwise the dose stands, and if they have turned in by
+the time it comes due, it parks itself and revives when they wake. Deferral is the honest
+version of "not during the night"; skipping ahead of the fact is a guess, and it was
+quietly costing a dose a day to anyone who stayed up late.
+
 **Going to bed does not clear the day.** An unanswered dose stays unanswered, parks
 overnight, and comes back in the morning re-timed to when the patient actually gets up --
 never logged as missed in the meantime. But saying nothing about it is how someone ends up

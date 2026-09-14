@@ -46,6 +46,11 @@ export async function handleCallback(
     return;
   }
 
+  // Tapping a reminder at half past one in the morning is proof of being awake, and it
+  // was not being counted: only inbound messages touched activity, so someone who
+  // answered every prompt by button was presumed asleep on the clock alone.
+  await db.touchActivity(chatId, now);
+
   const ctx: CmdCtx = { env, db, tg, chatId, userName, now };
 
   // --- prescription confirmation ------------------------------------------

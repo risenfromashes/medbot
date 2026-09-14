@@ -324,16 +324,19 @@ export function nextDue(
     effective = Math.max(effective, med.lastTakenAt + Math.min(med.minGapMs, med.stepSpacingMs || med.minGapMs));
   }
 
-  // Skip the night. An awake-only medicine whose next dose would fall while the patient
-  // is expected to be asleep is scheduled for the morning instead of sitting due at two
-  // in the morning. Deferring at the moment it becomes due would reach the same place,
-  // but this way /status and the digest say "tomorrow morning" rather than naming a time
-  // in the middle of the night, and nothing is ever pending through the small hours.
+  // Skip the night -- but only a night that is actually happening.
   //
-  // Critical medicines, and anything explicitly marked as not awake-only, are exempt:
-  // those are the ones that genuinely should wake you.
+  // While the patient is asleep, a dose landing before they are expected up is moved to
+  // the morning: /status says "tomorrow morning" rather than naming a time in the small
+  // hours, and nothing sits pending through them.
+  //
+  // While they are awake it is a prediction, and predictions do not get to delete doses.
+  // Writing off a dose due at ten past one because the clock says bedtime is one o'clock
+  // assumes a night that has not begun -- the patient may well still be up, and if they
+  // are not, the dose parks itself the moment it comes due and revives when they wake.
+  // Deferral is the honest version of this; skipping ahead of the fact is a guess.
   if (
-    med.awakeOnly && !med.critical &&
+    med.awakeOnly && !med.critical && facts.awake === false &&
     typeof facts.sleepFrom === 'number' && typeof facts.wakeNext === 'number' &&
     effective >= facts.sleepFrom && effective < facts.wakeNext
   ) {
