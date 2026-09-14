@@ -130,6 +130,53 @@ describe('how much is left', () => {
   });
 });
 
+describe('the meals line', () => {
+  const MEALY = {
+    version: 1, timezone: 'Asia/Dhaka',
+    day: { morning_poll_at: '06:30', presumed_wake_at: '09:00', evening_poll_at: '22:30', presumed_sleep_at: '23:00' },
+    meals: [
+      { id: 'breakfast', typical_local: '08:30' },
+      { id: 'lunch', typical_local: '13:30' },
+      { id: 'dinner', typical_local: '20:30' },
+    ],
+    medicines: [
+      { id: 'omep', name: 'Cap. Maxpro', dose: '1 capsule', pattern: '1+0+1', relation: 'before', course: { days: 7 } },
+    ],
+  };
+
+  async function setUp(): Promise<void> {
+    await enrol('Ayesha');
+    await bot.sendFile(PATIENT, 'p.json', JSON.stringify(MEALY));
+    await bot.tap(PATIENT, /Apply|Confirm|Yes/i);
+    await bot.send(PATIENT, '/awake');
+  }
+
+  it('lists meals in the order of the day, not alphabetically', async () => {
+    // SQLite served them off the (patient, meal) index, so /status said
+    // "breakfast · dinner · lunch" — which reads as a mistake, because it is one.
+    await setUp();
+    const text = await statusText();
+    const order = ['breakfast', 'lunch', 'dinner'].map((m) => text.indexOf(m));
+    expect(order[0]).toBeGreaterThan(-1);
+    expect(order[1], 'lunch is not after breakfast').toBeGreaterThan(order[0]!);
+    expect(order[2], 'dinner is not after lunch').toBeGreaterThan(order[1]!);
+  });
+
+  it('says when a meal that has not happened is expected', async () => {
+    await setUp();
+    const text = await statusText();
+    // A bare "·" tells nobody anything, and the before-meal tablets hang off this.
+    expect(text).toMatch(/lunch ~\d/);
+  });
+
+  it('says when a meal actually happened', async () => {
+    await setUp();
+    await bot.send(PATIENT, '/ate breakfast');
+    const text = await statusText();
+    expect(text).toMatch(/✅ breakfast \d/);
+  });
+});
+
 async function statusText(): Promise<string> {
   const before = bot.sent.length;
   await bot.send(PATIENT, '/status');

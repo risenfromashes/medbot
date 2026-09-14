@@ -1117,7 +1117,12 @@ export class Db {
   }
 
   async mealDefsFor(patientId: number): Promise<MealDef[]> {
-    const res = await this.d1.prepare('SELECT * FROM meal_defs WHERE patient_id = ?1').bind(patientId).all<Row>();
+    // In meal order. Without the ORDER BY, SQLite served them off the (patient, meal)
+    // index -- alphabetically -- and /status listed breakfast, dinner, lunch.
+    const res = await this.d1
+      .prepare('SELECT * FROM meal_defs WHERE patient_id = ?1 ORDER BY seq, typical_local')
+      .bind(patientId)
+      .all<Row>();
     return (res.results ?? []).map(rowToMealDef);
   }
 

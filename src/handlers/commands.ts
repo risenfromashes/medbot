@@ -16,6 +16,7 @@ import { resolveRetro } from '../core/retro.js';
 import { parseDuration, parseTime, splitTrailingTime } from '../core/timeparse.js';
 import { remainingFor, summarise } from '../core/remaining.js';
 import { looksLikeRealName } from '../core/names.js';
+import { wakeOffsets } from '../core/planMeals.js';
 import { HOUR, MINUTE, fmtDuration, isValidTimeZone, parseWall, zoneFor } from '../core/tz.js';
 import type { Zone } from '../core/tz.js';
 import { Db } from '../io/db.js';
@@ -1167,16 +1168,25 @@ async function statusFor(ctx: CmdCtx, view: { patient: Patient; z: Zone; isSelf:
   // Meals matter only if something actually depends on them.
   const mealDeps = meds.filter((m) => m.kind === 'meal');
   if (mealDeps.length > 0) {
-    const defs = await ctx.db.mealDefsFor(patient.id);
+    const defs = [...(await ctx.db.mealDefsFor(patient.id))].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
     const events = await ctx.db.mealEventsFor(patient.id, today);
+    const offsets = wakeOffsets(defs);
+    const anchor = patient.lastWakeAt ?? patient.wakeStateSince;
+
     const mealLine = defs
-      .map((d) => {
+      .map((d, i) => {
         const e = events.find((x) => x.meal === d.meal);
-        const mark = e === undefined ? '·' : e.source === 'skipped' ? '⏭' : '✅';
-        return `${mark} ${d.meal}`;
+        if (e !== undefined && e.source === 'skipped') return `⏭ ${d.meal}`;
+        if (e !== undefined && (e.source === 'confirmed' || e.source === 'presumed')) {
+          return `✅ ${d.meal} ${z.fmtTime12(e.at)}`;
+        }
+        // Still ahead: say when, because the before-meal tablets hang off it and "·"
+        // tells nobody anything.
+        const at = e?.at ?? anchor + (offsets[i] ?? 0);
+        return `· ${d.meal} ~${z.fmtTime12(at)}`;
       })
-      .join('  ');
-    if (mealLine !== '') lines.push('', `<b>Meals</b>  ${mealLine}`);
+      .join('\n');
+    if (mealLine !== '') lines.push('', `<b>Meals</b>\n${mealLine}`);
   }
 
   await reply(ctx, lines.join('\n'));
