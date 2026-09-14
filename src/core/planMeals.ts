@@ -124,14 +124,18 @@ export function planMeals(
     }
 
     // --- when is this meal assumed to be? ----------------------------------
-    // The time the prescription gave, pushed later if the patient got up late, and never
-    // bunched against the previous meal. Someone who got up at noon is not late for
-    // breakfast -- but someone who got up at seven does not eat dinner at one, which is
-    // where a purely wake-relative grid lands it.
-    const afterWake = def.afterWakeMs ?? defaultAfterWake(index);
+    // The time the prescription gave, held off by two things and nothing else: you cannot
+    // eat before you are up, and you do not eat lunch straight after a late breakfast.
+    //
+    // Meal times are far stickier than wake times. Getting up two hours late does not move
+    // lunch two hours later -- you eat at your usual time and skip or shorten breakfast.
+    // So waking is a floor on the first meal, not a grid every meal hangs off: deriving
+    // each one from the wake anchor put lunch an hour after its stated time for someone
+    // who got up at half past eight. The ladder below is only the fallback for a
+    // prescription that gave no times at all.
     const typicalAt = tryWall(z, today, def.typicalLocal);
-    let assumedAt = wakeAnchor + afterWake;
-    if (typicalAt !== null) assumedAt = Math.max(assumedAt, typicalAt);
+    const afterWake = def.afterWakeMs ?? (typicalAt === null ? defaultAfterWake(index) : DEFAULT_AFTER_WAKE);
+    let assumedAt = Math.max(typicalAt ?? -Infinity, wakeAnchor + afterWake);
     if (previousMealAt !== null) {
       assumedAt = Math.max(assumedAt, previousMealAt + (def.minGapAfterPrevMs || 3 * HOUR));
     }

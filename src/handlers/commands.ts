@@ -1982,6 +1982,31 @@ async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
     return;
   }
 
+  if (parts.length >= 2 && ['mealgap', 'meal_gap', 'betweenmeals'].includes(parts[0]!.toLowerCase())) {
+    // The other reason a meal shows later than its stated time: it is never proposed
+    // within this of the one before. Three hours suits most people and not everybody.
+    const ms = parseDuration(parts.slice(1).join(' '));
+    if (ms === null || ms < 30 * MINUTE || ms > 8 * HOUR) {
+      await reply(ctx, 'Give me a gap between 30 minutes and 8 hours, e.g. <code>/settings mealgap 2h</code>.');
+      return;
+    }
+    await ctx.env.MEDBOT_DB
+      .prepare('UPDATE meal_defs SET min_gap_after_prev_ms = ?2 WHERE patient_id = ?1')
+      .bind(patient.id, ms)
+      .run();
+    await ctx.env.MEDBOT_DB
+      .prepare('UPDATE patients SET next_action_at = ?2 WHERE id = ?1')
+      .bind(patient.id, ctx.now)
+      .run();
+    await ctx.db.audit(patient.id, 'setting_changed', String(ctx.chatId), { key: 'meal_gap', value: ms }, ctx.now);
+    await reply(
+      ctx,
+      `⚙️ I'll leave at least <b>${esc(fmtDuration(ms))}</b> between meals when I'm guessing at times. ` +
+        `A late breakfast still pushes lunch back, just by less.`,
+    );
+    return;
+  }
+
   if (parts.length >= 2 && ['minsleep', 'min_sleep', 'nightlength'].includes(parts[0]!.toLowerCase())) {
     const ms = parseDuration(parts.slice(1).join(' '));
     if (ms === null || ms < 15 * 60_000 || ms > 12 * 60 * 60_000) {
@@ -2043,6 +2068,7 @@ async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
       `<code>/settings evening 22:30</code>\n` +
       `<code>/settings sleep 01:00</code>\n` +
       `<code>/settings minsleep 4h</code>\n` +
+      `<code>/settings mealgap 3h</code>\n` +
       `<code>/settings digest 21:30</code>\n` +
       `<code>/tz Asia/Dhaka</code>\n\n` +
       `<i>"Assume awake" is the safety net: past that time I start reminding you even if ` +
