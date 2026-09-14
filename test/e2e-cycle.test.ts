@@ -331,6 +331,27 @@ describe('drops that have to be spaced', () => {
     expect(bot.sent.slice(mark).map((m) => m.text).join('\n')).not.toMatch(/Give it 10m/i);
   });
 
+  it('says nothing about a drop whose next dose is hours away', async () => {
+    // The one that reached a real chat: Vigalon had been taken already and its next dose
+    // was at quarter past three in the morning. Listing it read as "you still owe me
+    // this", and the button offered to mark a dose four hours out as already taken.
+    await twoDrops();
+    const { encodeCallback } = await import('../src/core/callbackCodec.js');
+    const pred = bot.d1.one("SELECT d.id FROM doses d JOIN medications m ON m.id=d.med_id WHERE m.med_key='pred'")!;
+    await bot.sendCallback(PATIENT, encodeCallback({ a: 'take', doseId: Number(pred['id']) }));
+    // Prednisolone now has a fresh dose four hours out, well clear of the spacing gap.
+    await bot.run(5 * MINUTE, 5 * MINUTE);
+
+    const mark = bot.sent.length;
+    await bot.tap(PATIENT, /Moxifloxacin|Taken|✅/);
+    const after = bot.sent.slice(mark).map((m) => m.text).join('\n');
+    expect(after, 'chased a drop that was not waiting on anything').not.toMatch(/Give it 10m/i);
+    expect(
+      bot.sent.slice(mark).flatMap((m) => m.buttons.flat()).some((b) => /Already did/i.test(b.text)),
+      'offered to mark a dose hours away as already taken',
+    ).toBe(false);
+  });
+
   it('says nothing about a drop that has already been skipped', async () => {
     await twoDrops();
     const pred = bot.d1.one("SELECT d.id FROM doses d JOIN medications m ON m.id=d.med_id WHERE m.med_key='pred'")!;

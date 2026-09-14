@@ -1589,27 +1589,37 @@ export async function noteSpacedNeighbours(
   if (patient === null) return;
   const z = zoneFor(patient.tz);
 
-  const waiting: Array<{ label: string; at: number; doseId: number }> = [];
+  // Only the drops queued alongside this one. A group member whose next dose is at
+  // quarter past three is not waiting on anything -- naming it read as "you still owe me
+  // this", and its button offered to mark a dose hours away as already taken.
+  const queued: Array<{ label: string; dueAt: number; doseId: number }> = [];
   for (const other of await ctx.db.medsFor(patientId)) {
     if (other.id === med.id || other.status !== 'active') continue;
     if (other.spacingGroup !== med.spacingGroup) continue;
     const live = await ctx.db.liveDoseFor(other.id);
-    if (live === null) continue;
-    if (live.status !== 'due' && live.status !== 'prompted' && live.status !== 'scheduled') continue;
-    if (live.takenAt !== null) continue;
-    waiting.push({
+    if (live === null || live.takenAt !== null) continue;
+    if (live.status !== 'due' && live.status !== 'prompted') continue;
+    queued.push({
       label: other.steps.length > 1 ? (other.steps[live.step]?.name ?? other.name) : other.name,
-      at: 0,
+      dueAt: live.effectiveDueAt,
       doseId: live.id,
     });
   }
-  if (waiting.length === 0) return;
+  if (queued.length === 0) return;
 
-  // Where the spacing constraint will actually put them, in the order the planner uses.
+  // And only the ones this actually moves, worked out the way the planner will: each takes
+  // the later of its own time and the running floor. A drop already sitting far enough
+  // ahead is left alone and not mentioned, because nothing has changed for it.
   const spacing = Math.max(med.spacingMs, 0);
-  waiting.forEach((w, i) => {
-    w.at = takenAt + spacing * (i + 1);
-  });
+  queued.sort((a, b) => a.dueAt - b.dueAt);
+  let floor = takenAt + spacing;
+  const waiting: Array<{ label: string; at: number; doseId: number }> = [];
+  for (const q of queued) {
+    const moved = Math.max(q.dueAt, floor);
+    if (moved > q.dueAt + MINUTE) waiting.push({ label: q.label, at: moved, doseId: q.doseId });
+    floor = moved + spacing;
+  }
+  if (waiting.length === 0) return;
 
   const lines = waiting.map((w) => `• <b>${esc(w.label)}</b> — ${z.fmtTime12(w.at)}`);
   await reply(
