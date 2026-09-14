@@ -59,6 +59,33 @@ wake you.
 Then the loop starts again from whenever you happen to wake, which may be nothing like
 today.
 
+## Who a command is about
+
+Buttons were never in doubt: an escalated prompt carries the dose id, so whoever taps it
+resolves that exact dose. Typing was, and typing is what people fall back on once the
+notification has scrolled away. `/took drops` from a caregiver used to resolve against
+their own empty record and answer "you have no medicines loaded"; `/ate breakfast` was
+worse, and silently wrote a meal against the wrong person.
+
+Every command with a subject now resolves one, in this order:
+
+1. an explicit `for <name>` at the end -- or `for me`, to override the default;
+2. your own record, if you are on medicines;
+3. the one person you look after who is;
+4. your own record;
+5. the only person there is.
+
+Anything genuinely ambiguous asks. Guessing here writes a medical record against the wrong
+human being, which is the one mistake that cannot be walked back by saying sorry.
+
+The practical effect is the case the whole arrangement exists for: **a caregiver with no
+prescription of their own gets a bot that is entirely the patient's.** Doses, meals, waking
+and sleeping, settings, the timezone, the prescription itself. The patient's chat is told
+what was done and by whom, so a quiet chat never has to be read as "nothing happened".
+`/name` is the exception -- it is about the person typing, not the person cared for.
+
+---
+
 ## Sleep, precisely
 
 `/sleep` ends the day. Three rules follow from that, and each one exists because the

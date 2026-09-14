@@ -6,7 +6,7 @@
  * a person does from their phone, not something that requires an edit and a redeploy.
  */
 
-import type { Medicine, Patient } from '../core/domain.js';
+import type { Chat, Medicine, Patient } from '../core/domain.js';
 import { describeCourse, describeSchedule, dosesPerDayInterval, hashString, parsePrescription } from '../core/prescription.js';
 import { PRESCRIPTION_PROMPT_PARTS } from '../core/promptText.js';
 import { describeJsonError, extractJson, looksLikeJsonFragment } from '../core/extractJson.js';
@@ -102,6 +102,119 @@ async function resolveViewable(
     }
   }
   return null;
+}
+
+/**
+ * Who is this command about?
+ *
+ * A caregiver typing `/took drops` means the person they look after -- they have no drops
+ * of their own. Before this, the command resolved to the caregiver's own empty record:
+ * `/took` said "you have no medicines loaded" and, worse, `/ate breakfast` silently wrote
+ * a meal against the wrong person. Buttons always worked, because an escalated prompt
+ * carries the dose id with it; typing did not, which is the half people fall back on when
+ * the notification has scrolled away.
+ *
+ * Resolution, in order: an explicit `for <name>`; your own record if you have medicines;
+ * the one person you look after; your own record; the only person there is. Anything
+ * genuinely ambiguous asks rather than guessing, because guessing here writes a medical
+ * record for the wrong human being.
+ */
+interface Acting {
+  patient: Patient;
+  z: Zone;
+  isSelf: boolean;
+  canAck: boolean;
+  /** The arguments with any `for <name>` removed. */
+  rest: string;
+}
+
+async function actingPatient(ctx: CmdCtx, args = ''): Promise<Acting | { ambiguous: string[] } | null> {
+  const links = await ctx.db.linksForChat(ctx.chatId);
+  if (links.length === 0) return null;
+
+  const people: Array<{ patient: Patient; link: Chat; hasMeds: boolean }> = [];
+  for (const link of links) {
+    const patient = await ctx.db.getPatient(link.patientId);
+    if (patient === null) continue;
+    const meds = await ctx.db.medsFor(patient.id);
+    people.push({ patient, link, hasMeds: meds.some((m) => m.status === 'active') });
+  }
+  if (people.length === 0) return null;
+
+  const make = (chosen: { patient: Patient; link: Chat }, rest: string): Acting => ({
+    patient: chosen.patient,
+    z: zoneFor(chosen.patient.tz),
+    isSelf: chosen.link.role === 'patient',
+    canAck: chosen.link.canAck,
+    rest: rest.trim(),
+  });
+
+  // "…for Ifti", anywhere in the arguments, names the person explicitly; "for me" is the
+  // way back to your own record when the default has sensibly gone elsewhere.
+  const named = /(^|\s)for\s+(\S+)\s*$/i.exec(args);
+  if (named !== null) {
+    const wanted = (named[2] ?? '').toLowerCase();
+    const rest = args.slice(0, named.index);
+    if (wanted === 'me' || wanted === 'myself') {
+      const own = people.find((p) => p.link.role === 'patient');
+      if (own !== undefined) return make(own, rest);
+    }
+    const match = people.find((p) => p.patient.displayName.toLowerCase().startsWith(wanted));
+    if (match !== undefined) return make(match, rest);
+    return { ambiguous: people.map((p) => p.patient.displayName) };
+  }
+
+  const self = people.find((p) => p.link.role === 'patient');
+  if (self !== undefined && self.hasMeds) return make(self, args);
+
+  const withMeds = people.filter((p) => p.hasMeds);
+  if (withMeds.length === 1) return make(withMeds[0]!, args);
+  if (withMeds.length > 1) return { ambiguous: withMeds.map((p) => p.patient.displayName) };
+
+  if (self !== undefined) return make(self, args);
+  if (people.length === 1) return make(people[0]!, args);
+  return { ambiguous: people.map((p) => p.patient.displayName) };
+}
+
+/** Unwrap the above, answering the ambiguity or the missing setup itself. */
+async function acting(ctx: CmdCtx, args = '', verb = 'that'): Promise<Acting | null> {
+  const found = await actingPatient(ctx, args);
+  if (found === null) {
+    await needsSetup(ctx);
+    return null;
+  }
+  if ('ambiguous' in found) {
+    await reply(
+      ctx,
+      `Who is ${esc(verb)} for? You look after more than one person:\n` +
+        found.ambiguous.map((n) => `• ${esc(n)}`).join('\n') +
+        `\n\nAdd their name at the end, e.g. <code>for ${esc(found.ambiguous[0] ?? 'name')}</code>.`,
+    );
+    return null;
+  }
+  if (!found.isSelf && !found.canAck) {
+    await reply(ctx, `You can see ${esc(found.patient.displayName)}'s reminders but not answer for them.`);
+    return null;
+  }
+  return found;
+}
+
+/**
+ * Tell everyone else what was just done on someone's behalf.
+ *
+ * A caregiver answering for a patient is the point of the arrangement, but the patient's
+ * own chat going quiet about it is not: they would have no way to tell "somebody handled
+ * it" from "nothing happened", which is the ambiguity this whole bot exists to remove.
+ */
+async function tellTheOthers(ctx: CmdCtx, ap: Acting, text: string): Promise<void> {
+  if (ap.isSelf) return;
+  const chats = await ctx.db.chatsFor(ap.patient.id);
+  await broadcast({ db: ctx.db, tg: ctx.tg, z: ap.z, now: ctx.now }, chats, text, ctx.chatId);
+}
+
+/** "— for Ifti", appended when the acting chat is not the patient's own. */
+function onBehalf(ap: Acting): string {
+  return ap.isSelf ? '' : ` — for <b>${esc(ap.patient.displayName)}</b>`;
 }
 
 /** Match a user-typed medicine name against the patient's list, loosely but safely. */
@@ -500,9 +613,10 @@ async function cmdCaregiver(ctx: CmdCtx, args: string): Promise<void> {
 const MIN_AWAKE = 4 * HOUR;
 
 async function cmdWake(ctx: CmdCtx, kind: 'wake' | 'sleep', args: string, force = false): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+  const ap = await acting(ctx, args, kind === 'wake' ? 'the morning' : 'bedtime');
+  if (ap === null) return;
   const { patient, z } = ap;
+  args = ap.rest;
 
   let at = ctx.now;
   let suffix = '';
@@ -547,11 +661,18 @@ async function cmdWake(ctx: CmdCtx, kind: 'wake' | 'sleep', args: string, force 
   }
 
   if (kind === 'wake') {
-    await reply(ctx, `☀️ Good morning${suffix}. Starting today's schedule — I'll let you know when something is due.`);
+    await reply(
+      ctx,
+      ap.isSelf
+        ? `☀️ Good morning${suffix}. Starting today's schedule — I'll let you know when something is due.`
+        : `☀️ Noted${suffix} — <b>${esc(patient.displayName)}</b> is up. Starting their day.`,
+    );
+    await tellTheOthers(ctx, ap, `☀️ ${esc(ctx.userName)} says you're up${suffix}. Starting today's schedule.`);
     return;
   }
 
   await sayGoodnight(ctx, ap, suffix);
+  await tellTheOthers(ctx, ap, `🌙 ${esc(ctx.userName)} says you've turned in${suffix}. I'll keep quiet until morning.`);
 }
 
 /**
@@ -602,8 +723,9 @@ async function sayGoodnight(
 
 /** The answer to that question. Exported because the button lands in the callback handler. */
 export async function resolveBedtime(ctx: CmdCtx, choice: 'took' | 'skip' | 'leave'): Promise<string> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return 'I need to know who you are first — send /start.';
+  const found = await actingPatient(ctx, '');
+  if (found === null || 'ambiguous' in found) return 'I need to know who you are first — send /start.';
+  const ap = found;
   const { patient, z } = ap;
 
   if (choice === 'leave') {
@@ -643,9 +765,10 @@ export async function resolveBedtime(ctx: CmdCtx, choice: 'took' | 'skip' | 'lea
  * before-meal tablet can be timed at all.
  */
 async function cmdEating(ctx: CmdCtx, args: string): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+  const ap = await acting(ctx, args, 'the meal');
+  if (ap === null) return;
   const { patient, z } = ap;
+  args = ap.rest;
 
   const parts = args.trim().split(/\s+/).filter((x) => x !== '');
   const meal = (parts[0] ?? '').toLowerCase();
@@ -700,9 +823,10 @@ async function cmdEating(ctx: CmdCtx, args: string): Promise<void> {
 }
 
 async function cmdAte(ctx: CmdCtx, args: string): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+  const ap = await acting(ctx, args, 'the meal');
+  if (ap === null) return;
   const { patient, z } = ap;
+  args = ap.rest;
 
   const { head, time } = splitTrailingTime(args, ctx.now, z);
   const meal = head.trim().toLowerCase();
@@ -719,15 +843,17 @@ async function cmdAte(ctx: CmdCtx, args: string): Promise<void> {
       await clearPromptMessages({ db: ctx.db, tg: ctx.tg, z, now: ctx.now }, q.id);
     }
   }
-  await reply(ctx, `🍽 Noted — ${esc(meal)} at ${z.fmtTime12(at)}.`);
+  await reply(ctx, `🍽 Noted — ${esc(meal)} at ${z.fmtTime12(at)}${onBehalf(ap)}.`);
+  await tellTheOthers(ctx, ap, `🍽 ${esc(ctx.userName)} recorded your ${esc(meal)} at ${z.fmtTime12(at)}.`);
 }
 
 // --- doses ---------------------------------------------------------------
 
 async function cmdTook(ctx: CmdCtx, args: string): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+  const ap = await acting(ctx, args, 'the dose');
+  if (ap === null) return;
   const { patient, z } = ap;
+  args = ap.rest;
 
   const meds = await ctx.db.medsFor(patient.id);
   const { head, time } = splitTrailingTime(args, ctx.now, z);
@@ -835,8 +961,9 @@ async function cmdTook(ctx: CmdCtx, args: string): Promise<void> {
 }
 
 async function cmdSkip(ctx: CmdCtx, args: string): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+  const ap = await acting(ctx, args, 'the dose');
+  if (ap === null) return;
+  args = ap.rest;
   const meds = await ctx.db.medsFor(ap.patient.id);
   const matches = matchMed(meds, args);
   if (matches.length !== 1) {
@@ -858,8 +985,9 @@ async function cmdSkip(ctx: CmdCtx, args: string): Promise<void> {
 }
 
 async function cmdSnooze(ctx: CmdCtx, args: string): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+  const ap = await acting(ctx, args, 'the reminder');
+  if (ap === null) return;
+  args = ap.rest;
   const parts = args.split(/\s+/).filter((p) => p !== '');
   const durText = parts.length > 1 ? parts[parts.length - 1]! : '';
   const dur = durText !== '' ? parseDuration(durText) : null;
@@ -1055,8 +1183,12 @@ async function statusFor(ctx: CmdCtx, view: { patient: Patient; z: Zone; isSelf:
 }
 
 async function cmdMeds(ctx: CmdCtx, args = ''): Promise<void> {
-  const view = await resolveViewable(ctx, args);
+  const view = args.trim() === '' ? await actingPatient(ctx, '') : await resolveViewable(ctx, args);
   if (view === null) return needsSetup(ctx);
+  if ('ambiguous' in view) {
+    await reply(ctx, `Whose medicines? ${view.ambiguous.map(esc).join(', ')} — name one, e.g. <code>/meds ${esc(view.ambiguous[0] ?? '')}</code>.`);
+    return;
+  }
   const ap = { patient: view.patient, z: view.z };
   const meds = await ctx.db.medsFor(ap.patient.id, true);
   if (meds.length === 0) {
@@ -1082,8 +1214,9 @@ async function cmdMeds(ctx: CmdCtx, args = ''): Promise<void> {
 }
 
 async function cmdLog(ctx: CmdCtx, args: string): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+  const ap = await acting(ctx, args, 'the log');
+  if (ap === null) return;
+  args = ap.rest;
   const days = Math.min(30, Math.max(1, Number(args.trim()) || 7));
   const since = ap.z.addLocalDays(ap.z.localDay(ctx.now), -(days - 1));
   const rows = await ctx.db.adherence(ap.patient.id, since);
@@ -1123,8 +1256,9 @@ async function cmdHealth(ctx: CmdCtx): Promise<void> {
 // --- medicine management --------------------------------------------------
 
 async function cmdMedStatus(ctx: CmdCtx, args: string, status: Medicine['status']): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+  const ap = await acting(ctx, args, 'the medicine');
+  if (ap === null) return;
+  args = ap.rest;
   const meds = await ctx.db.medsFor(ap.patient.id, true);
   const matches = matchMed(meds, args);
   if (matches.length !== 1) {
@@ -1144,8 +1278,9 @@ async function cmdMedStatus(ctx: CmdCtx, args: string, status: Medicine['status'
 }
 
 async function cmdTz(ctx: CmdCtx, args: string): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+  const ap = await acting(ctx, args, 'the timezone');
+  if (ap === null) return;
+  args = ap.rest;
   const tz = args.trim();
   if (tz === '') {
     await reply(ctx, `Currently <code>${esc(ap.patient.tz)}</code> — it's ${ap.z.fmtTime12(ctx.now)} there.\nChange it with <code>/tz Asia/Dhaka</code>.`);
@@ -1165,8 +1300,9 @@ async function cmdTz(ctx: CmdCtx, args: string): Promise<void> {
 // --- prescriptions --------------------------------------------------------
 
 async function cmdImport(ctx: CmdCtx, args: string, msg: TgIncomingMessage): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+  const ap = await acting(ctx, args, 'the prescription');
+  if (ap === null) return;
+  args = ap.rest;
 
   let raw = args.trim();
 
@@ -1290,9 +1426,18 @@ async function ingestPrescription(
   const warnings = result.warnings.length > 0
     ? `\n\n<b>Worth checking</b>\n${result.warnings.map((w) => `• ${esc(w)}`).join('\n')}`
     : '';
+  // Whose prescription this is, whenever it is not the reader's own. A caregiver
+  // importing for the person they look after is exactly what should happen; being unsure
+  // which of the two it landed on is not.
+  const owner = await ctx.db.getPatient(patientId);
+  const ownLink = (await ctx.db.linksForChat(ctx.chatId)).find((l) => l.role === 'patient');
+  const forWhom = owner !== null && ownLink?.patientId !== patientId
+    ? ` — for <b>${esc(owner.displayName)}</b>`
+    : '';
+
   await reply(
     ctx,
-    `<b>Here's what would change</b>\n\n${diff}${warnings}` +
+    `<b>Here's what would change</b>${forWhom}\n\n${diff}${warnings}` +
       `${presc.tz === null ? await timezoneWarning(ctx, patientId) : ''}\n\n<i>Nothing has been applied yet.</i>`,
     [[
       { text: '✅ Apply', callback_data: encodeCallback({ a: 'confirmImport', versionId }) },
@@ -1400,8 +1545,8 @@ async function timezoneWarning(ctx: CmdCtx, patientId: number): Promise<string> 
 }
 
 async function cmdExport(ctx: CmdCtx): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+  const ap = await acting(ctx, '', 'the prescription');
+  if (ap === null) return;
   const raw = await ctx.db.latestPrescription(ap.patient.id);
   if (raw === null) {
     await reply(ctx, 'No prescription has been imported yet.');
@@ -1427,8 +1572,9 @@ async function cmdPrompt(ctx: CmdCtx): Promise<void> {
  * which would mean guessing, and guessing about a dose schedule is not acceptable.
  */
 async function cmdEdit(ctx: CmdCtx, args: string): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+  const ap = await acting(ctx, args, 'the change');
+  if (ap === null) return;
+  args = ap.rest;
 
   const usage =
     '<b>Changing a medicine</b>\n' +
@@ -1632,8 +1778,9 @@ async function cmdEdit(ctx: CmdCtx, args: string): Promise<void> {
 }
 
 async function cmdExtend(ctx: CmdCtx, args: string): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+  const ap = await acting(ctx, args, 'the course');
+  if (ap === null) return;
+  args = ap.rest;
 
   const parts = args.trim().split(/\s+/).filter((x) => x !== '');
   if (parts.length < 2) {
@@ -1679,8 +1826,9 @@ async function cmdExtend(ctx: CmdCtx, args: string): Promise<void> {
  * produce this too.
  */
 async function cmdAdd(ctx: CmdCtx, args: string): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+  const ap = await acting(ctx, args, 'the medicine');
+  if (ap === null) return;
+  args = ap.rest;
 
   let raw = args.trim();
   const fence = /```(?:json)?\s*([\s\S]*?)```/.exec(raw);
@@ -1798,8 +1946,9 @@ async function cmdPatients(ctx: CmdCtx): Promise<void> {
  * everything else lives in the prescription.
  */
 async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
-  const ap = await activePatient(ctx);
-  if (ap === null) return needsSetup(ctx);
+  const ap = await acting(ctx, args, 'the settings');
+  if (ap === null) return;
+  args = ap.rest;
   const { patient, z } = ap;
 
   const parts = args.trim().split(/\s+/).filter((x) => x !== '');
@@ -1812,6 +1961,10 @@ async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
   };
 
   if (parts.length >= 1 && ['name', 'callme'].includes(parts[0]!.toLowerCase())) {
+    // "What should I call you?" is about the person typing. Everything else in /settings
+    // belongs to whoever's day it is; this one does not, unless they say "for <name>".
+    const target = ap.isSelf ? ap : ((await actingPatient(ctx, 'for me')) as Acting | null);
+    const who = target !== null && 'patient' in target ? target : ap;
     const newName = parts.slice(1).join(' ').trim().slice(0, 60);
     if (newName === '') {
       await reply(ctx, `What should I call you? Send <code>/name Ayesha</code>.`);
@@ -1819,7 +1972,7 @@ async function cmdSettings(ctx: CmdCtx, args: string): Promise<void> {
     }
     await ctx.env.MEDBOT_DB
       .prepare('UPDATE patients SET display_name = ?2 WHERE id = ?1')
-      .bind(patient.id, newName)
+      .bind(who.patient.id, newName)
       .run();
     await ctx.env.MEDBOT_DB
       .prepare("UPDATE chats SET display_name = ?2 WHERE chat_id = ?1 AND role = 'patient'")
@@ -1949,7 +2102,11 @@ There is one kind of account. You have your own prescription, and you can also b
 <code>/caregiver &lt;code&gt;</code> — back someone else up, using their code.
 <code>/patients</code> — who you're linked to, with buttons to end any of it.
 <code>/leave</code> — stop backing someone up.
-<code>/status &lt;name&gt;</code> · <code>/meds &lt;name&gt;</code> — check on someone you back up.
+
+<b>Answering for someone</b>
+If you back someone up and have no prescription of your own, every command is about them: <code>/took drops</code>, <code>/ate lunch</code>, <code>/sleep</code>, <code>/meds</code> — all theirs, and they're told what you did. If you're on medicines too, commands are about you unless you say whose: <code>/took drops for Ifti</code>, or <code>for me</code> to be sure.
+
+<code>/status</code> on its own covers you and everyone you look after.
 
 Every evening I send a short summary of the day. If that stops arriving, something is wrong — <code>/health</code> tells you whether the scheduler is still running.
 

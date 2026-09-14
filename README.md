@@ -56,6 +56,10 @@ It works for one person. It also works for a household: someone can be your back
 you don't answer a reminder within a few minutes, the bot asks *them* instead, and they can
 confirm on your behalf. That turns "I forgot" from one point of failure into two.
 
+If you're backing someone up and take nothing yourself, the bot simply *is* theirs: `/took
+drops`, `/ate lunch`, `/status`, all of it about them, and they're told what you did. If
+you're both on medicines, commands are about you unless you say `for <name>`.
+
 There's one kind of account. Everyone has their own prescription, and backing someone else
 up is something you do as well — not instead.
 
