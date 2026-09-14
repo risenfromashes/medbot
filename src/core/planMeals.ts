@@ -21,7 +21,7 @@
 
 import type { Action, MealDef, MealEvent, PatientState } from './domain.js';
 import type { LocalDay, Zone } from './tz.js';
-import { HOUR, MINUTE } from './tz.js';
+import { HOUR, MINUTE, tryParseWall } from './tz.js';
 
 export interface MealFacts {
   /** Per meal id: when to schedule against, and how firm that is. */
@@ -46,14 +46,11 @@ const MIN_LEAD = 30 * MINUTE;
 /** How long after a planned time to keep asking before assuming it happened. */
 const PRESUME_AFTER_PLAN = 2 * HOUR;
 
-/** A wall time on a local day, or null if the prescription gave something unreadable. */
-function tryWall(z: Zone, day: LocalDay, wall: string | null): number | null {
+/** Minutes past midnight, or null if the prescription gave something unreadable. */
+function wallMinutes(wall: string | null): number | null {
   if (wall === null || wall === '') return null;
-  try {
-    return z.wallOnDayUtc(day, wall);
-  } catch {
-    return null;
-  }
+  const parsed = tryParseWall(wall);
+  return parsed === null ? null : parsed.h * 60 + parsed.mi;
 }
 
 function ordered(defs: MealDef[]): MealDef[] {
@@ -68,6 +65,49 @@ function ordered(defs: MealDef[]): MealDef[] {
 /** Sensible spacing when a prescription did not say. */
 function defaultAfterWake(index: number): number {
   return DEFAULT_AFTER_WAKE + index * 5.25 * HOUR;
+}
+
+/**
+ * How long after waking each meal falls.
+ *
+ * Meals hang off the wake time, not the clock -- the premise the whole bot is built on.
+ * Someone who gets up at ten has not missed an 08:30 breakfast, and their lunch is not
+ * half an hour after it.
+ *
+ * But the *spacing* between them should come from the prescription rather than a
+ * hardcoded ladder. "08:30, 13:30, 20:30" is a description of somebody's day: five hours
+ * from breakfast to lunch, seven from lunch to dinner. Keeping those gaps and anchoring
+ * the first on waking gives a day that is both adaptive and shaped like the one the
+ * patient actually has. The old fixed 5.25h step ignored the prescription entirely and
+ * put dinner where nobody eats it.
+ */
+export function wakeOffsets(defs: MealDef[]): number[] {
+  const out: number[] = [];
+  let previousTypical: number | null = null;
+
+  for (const [index, def] of defs.entries()) {
+    const typical = wallMinutes(def.typicalLocal);
+
+    if (def.afterWakeMs !== null) {
+      out.push(def.afterWakeMs);
+      previousTypical = typical;
+      continue;
+    }
+    if (index === 0 || previousTypical === null || typical === null) {
+      out.push(defaultAfterWake(index));
+      previousTypical = typical;
+      continue;
+    }
+
+    // Gaps wrap past midnight, and a prescription that lists its meals out of order gets
+    // the fallback rather than a negative one.
+    let gap = typical - previousTypical;
+    if (gap <= 0) gap += 24 * 60;
+    const previousOffset = out[index - 1] ?? defaultAfterWake(index - 1);
+    out.push(previousOffset + Math.min(gap * MINUTE, 12 * HOUR));
+    previousTypical = typical;
+  }
+  return out;
 }
 
 /** How far ahead of this meal we must ask, given what is meant to be taken before it. */
@@ -100,6 +140,7 @@ export function planMeals(
   const skipped = new Set<string>();
   const wakeUps: number[] = [];
   const defs = ordered(state.mealDefs);
+  const offsets = wakeOffsets(defs);
 
   let previousMealAt: number | null = null;
 
@@ -124,18 +165,10 @@ export function planMeals(
     }
 
     // --- when is this meal assumed to be? ----------------------------------
-    // The time the prescription gave, held off by two things and nothing else: you cannot
-    // eat before you are up, and you do not eat lunch straight after a late breakfast.
-    //
-    // Meal times are far stickier than wake times. Getting up two hours late does not move
-    // lunch two hours later -- you eat at your usual time and skip or shorten breakfast.
-    // So waking is a floor on the first meal, not a grid every meal hangs off: deriving
-    // each one from the wake anchor put lunch an hour after its stated time for someone
-    // who got up at half past eight. The ladder below is only the fallback for a
-    // prescription that gave no times at all.
-    const typicalAt = tryWall(z, today, def.typicalLocal);
-    const afterWake = def.afterWakeMs ?? (typicalAt === null ? defaultAfterWake(index) : DEFAULT_AFTER_WAKE);
-    let assumedAt = Math.max(typicalAt ?? -Infinity, wakeAnchor + afterWake);
+    // Relative to waking, always. The day starts when the patient gets up, and the meals
+    // in it move with them -- keeping the spacing their prescription describes, rather
+    // than a clock time that assumes everybody's morning began at the same moment.
+    let assumedAt = wakeAnchor + (offsets[index] ?? defaultAfterWake(index));
     if (previousMealAt !== null) {
       assumedAt = Math.max(assumedAt, previousMealAt + (def.minGapAfterPrevMs || 3 * HOUR));
     }

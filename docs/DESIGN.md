@@ -59,6 +59,28 @@ wake you.
 Then the loop starts again from whenever you happen to wake, which may be nothing like
 today.
 
+## Meals hang off waking
+
+The whole premise: the day starts when the patient gets up, and the meals in it move with
+them. Someone who surfaced at eleven has not missed an 08:30 breakfast, and a tablet due
+half an hour before it is not three hours overdue.
+
+What the prescription contributes is the *rhythm*, not the clock. "08:30, 13:30, 20:30"
+says five hours from breakfast to lunch and seven from lunch to dinner; those gaps are kept
+and the first is anchored on waking. Up at 06:30 gives 07:15 / 12:15 / 19:15; up at 08:35
+gives 09:20 / 14:20 / 21:20; the shape of the day is identical, it has simply moved. A
+hardcoded ladder -- 45 minutes, then five and a quarter hours per meal -- ignored the
+prescription entirely and put dinner where nobody eats it. A prescription that gives no
+times at all still falls back to that ladder, because something has to be assumed.
+
+Two constraints hold on top. A meal is never proposed within `min_gap_after_prev` of the
+one before (three hours by default, `/settings mealgap`), so a breakfast eaten at 11:27 does
+not get lunch half an hour later. And the proposed time never moves once set: recomputing
+it from `now` on every tick meant a before-meal tablet was pushed back a minute every
+minute and never once became due.
+
+---
+
 ## Who a command is about
 
 Buttons were never in doubt: an escalated prompt carries the dose id, so whoever taps it

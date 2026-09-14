@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { World, makeChat, makeMed, TZ } from '../simulate.js';
 import { HOUR, MINUTE, zoneFor } from '../../src/core/tz.js';
-import { planMeals } from '../../src/core/planMeals.js';
+import { planMeals, wakeOffsets } from '../../src/core/planMeals.js';
 import type { MealDef } from '../../src/core/domain.js';
 
 const z = zoneFor(TZ);
@@ -287,14 +287,14 @@ describe('the proposal is always actionable', () => {
 });
 
 /**
- * Meal times are stickier than wake times.
+ * Meals hang off waking, keeping the spacing the prescription describes.
  *
- * Getting up two hours late does not move lunch two hours later: you eat at your usual
- * time and shorten breakfast. Deriving every meal from the wake anchor -- 45 minutes,
- * then five and a quarter hours per meal after that -- showed someone who got up at 8:35
- * a lunch at 14:35 when their prescription plainly said 13:30.
+ * The day starts when the patient gets up -- that is the premise the whole bot is built
+ * on, and meals are no exception. What comes from the prescription is the *rhythm*:
+ * "08:30, 13:30, 20:30" says five hours from breakfast to lunch and seven from lunch to
+ * dinner. A hardcoded 5.25h step ignored that and put dinner where nobody eats it.
  */
-describe('a late start does not drag the whole day', () => {
+describe('meals follow waking, spaced as the prescription describes', () => {
   const zz = zoneFor(TZ);
   const wall = (hhmm: string): number => zz.wallOnDayUtc('2026-09-14', hhmm);
 
@@ -320,29 +320,43 @@ describe('a late start does not drag the whole day', () => {
       w.state, w.now, zz, zz.localDay(w.now), true, () => undefined, () => false, wall(wakeAt),
     );
     const out = new Map<string, number>();
-    for (const [meal, v] of facts.meals) out.set(meal, v.at);
+    for (const [meal, v] of facts.meals) out.set(meal, v.at - wall(wakeAt));
     return out;
   }
 
-  it('keeps lunch and dinner at the times the prescription gave', () => {
-    // The exact case: up at 8:35, lunch shown at 14:35 instead of 13:30.
-    const m = mealsAt('08:35');
-    expect(m.get('lunch')).toBe(wall('13:30'));
-    expect(m.get('dinner')).toBe(wall('20:30'));
+  it('takes the gaps between meals from the prescription', () => {
+    // 08:30 -> 13:30 -> 20:30 is five hours and then seven, whatever time you got up.
+    const offsets = wakeOffsets([
+      { patientId: 1, meal: 'breakfast', typicalLocal: '08:30', askAfterLocal: '09:30', presumeAtLocal: null, afterWakeMs: null, minGapAfterPrevMs: 3 * HOUR, seq: 0 },
+      { patientId: 1, meal: 'lunch', typicalLocal: '13:30', askAfterLocal: '14:30', presumeAtLocal: null, afterWakeMs: null, minGapAfterPrevMs: 3 * HOUR, seq: 1 },
+      { patientId: 1, meal: 'dinner', typicalLocal: '20:30', askAfterLocal: '21:30', presumeAtLocal: null, afterWakeMs: null, minGapAfterPrevMs: 3 * HOUR, seq: 2 },
+    ]);
+    expect(offsets).toEqual([45 * MINUTE, 45 * MINUTE + 5 * HOUR, 45 * MINUTE + 12 * HOUR]);
   });
 
-  it('still will not put a meal before the patient is up', () => {
-    const m = mealsAt('12:00');
-    expect(m.get('breakfast')).toBe(wall('12:45'));
-    // Lunch keeps its own time, but not within three hours of that breakfast.
-    expect(m.get('lunch')).toBe(wall('15:45'));
-    expect(m.get('dinner')).toBe(wall('20:30'));
+  it('moves the whole day when the patient gets up late', () => {
+    const early = mealsAt('06:30');
+    const late = mealsAt('11:00');
+    // Identical offsets from waking: the day shifts, its shape does not.
+    expect([...late.entries()].sort()).toEqual([...early.entries()].sort());
+    expect(early.get('breakfast')).toBe(45 * MINUTE);
+    expect(early.get('lunch')).toBe(45 * MINUTE + 5 * HOUR);
+    expect(early.get('dinner')).toBe(45 * MINUTE + 12 * HOUR);
   });
 
-  it('does push lunch back after a genuinely late breakfast', () => {
-    // This one is real: nobody eats lunch half an hour after eating at 11:27.
+  it('does not bunch lunch against a genuinely late breakfast', () => {
+    // Up at 8:35 and breakfast not until 11:27: lunch waits three hours, not five.
     const m = mealsAt('08:35', { breakfastAt: '11:27' });
-    expect(m.get('lunch')).toBe(wall('14:27'));
-    expect(m.get('dinner')).toBe(wall('20:30'));
+    expect(m.get('lunch')).toBe(wall('14:27') - wall('08:35'));
+    expect(m.get('dinner')).toBe(45 * MINUTE + 12 * HOUR);
+  });
+
+  it('falls back to a sensible ladder when the prescription gave no times', () => {
+    const offsets = wakeOffsets([
+      { patientId: 1, meal: 'breakfast', typicalLocal: '', askAfterLocal: '', presumeAtLocal: null, afterWakeMs: null, minGapAfterPrevMs: 3 * HOUR, seq: 0 },
+      { patientId: 1, meal: 'lunch', typicalLocal: '', askAfterLocal: '', presumeAtLocal: null, afterWakeMs: null, minGapAfterPrevMs: 3 * HOUR, seq: 1 },
+    ]);
+    expect(offsets[0]).toBe(45 * MINUTE);
+    expect(offsets[1]).toBeGreaterThan(4 * HOUR);
   });
 });
