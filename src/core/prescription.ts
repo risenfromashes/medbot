@@ -576,7 +576,13 @@ function wakeSpread(from: string, to: string, n: number): ParsedSchedule {
   let span = b.h * 60 + b.mi - (a.h * 60 + a.mi);
   if (span <= 0) span += 24 * 60;
   const gap = n <= 1 ? 24 * HOUR : Math.round((span / (n - 1)) * MINUTE);
-  return { kind: 'interval', spec: { kind: 'interval', intervalMs: gap, anchor: 'wake' }, intervalMs: gap };
+  return {
+    kind: 'interval',
+    // The count travels with the interval: it is what makes "that's today's four" a
+    // statement the scheduler can act on rather than an arithmetic coincidence.
+    spec: { kind: 'interval', intervalMs: gap, anchor: 'wake', dosesPerDay: n },
+    intervalMs: gap,
+  };
 }
 
 function parseSchedule(

@@ -131,6 +131,16 @@ export interface MedSpec {
   intervalMs?: number;
   /** For `interval`: whether the day's first dose hangs off the wake-up time. */
   anchor?: 'wake' | 'clock';
+  /**
+   * How many doses a day the prescription asked for, when it said so as a count.
+   *
+   * "Four times a day" is compiled to an interval across the waking hours, and the four
+   * used to be thrown away at that point -- so nothing downstream knew the day's quota
+   * was met, and a fifth dose was cheerfully computed for quarter past three in the
+   * morning. It decides whether a dose landing past bedtime is worth pulling forward or
+   * simply belongs to tomorrow.
+   */
+  dosesPerDay?: number;
   times?: string[];
   meal?: MealRef;
   /**

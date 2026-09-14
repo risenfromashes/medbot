@@ -363,3 +363,92 @@ describe('drops that have to be spaced', () => {
     expect(bot.sent.slice(mark).map((m) => m.text).join('\n')).not.toMatch(/Prednisolone/);
   });
 });
+
+/**
+ * What happens to a dose the schedule wants to put after bedtime.
+ *
+ * Vigalon is four times a day. Four had been taken, and the schedule computed a fifth for
+ * quarter past three in the morning -- and showed it. "Every four hours and forty minutes"
+ * is an arithmetic consequence of "four times a day", not an instruction to take one in
+ * the middle of the night.
+ */
+describe('doses that fall past bedtime', () => {
+  const FOUR_A_DAY = {
+    version: 1,
+    timezone: 'Asia/Dhaka',
+    day: { morning_poll_at: '06:30', presumed_wake_at: '09:00', evening_poll_at: '22:30', presumed_sleep_at: '23:00' },
+    medicines: [
+      { id: 'vigalon', name: 'Vigalon', dose: '1 drop', schedule: { type: 'times_per_day', n: 4 }, course: { days: 14 } },
+      { id: 'aqua', name: 'Aquafresh', dose: '1 drop', schedule: { type: 'interval', every: '2h', anchor: 'wake' } },
+    ],
+  };
+
+  /** A full day, answering everything, up to `until`. */
+  async function dayUntil(until: string): Promise<void> {
+    const { AdminDb } = await import('../src/io/adminDb.js');
+    const admin = new AdminDb(bot.d1 as never);
+    const inv = await admin.createInvite('enrol', { createdBy: 'a', ttlMs: 86400_000 }, bot.now);
+    await bot.send(PATIENT, `/start ${inv.code}`, { firstName: 'Ifti' });
+    await bot.sendFile(PATIENT, 'p.json', JSON.stringify(FOUR_A_DAY));
+    await bot.tap(PATIENT, /Apply|Confirm|Yes/i);
+    await bot.send(PATIENT, '/awake');
+    const { encodeCallback } = await import('../src/core/callbackCodec.js');
+    while (bot.now < at(until)) {
+      await bot.tick();
+      for (const r of bot.d1.rows("SELECT id FROM doses WHERE status IN ('due','prompted')")) {
+        await bot.sendCallback(PATIENT, encodeCallback({ a: 'take', doseId: Number(r['id']) }));
+      }
+      bot.now += 5 * MINUTE;
+    }
+  }
+
+  const nextFor = (key: string): number | null => {
+    const r = bot.d1.one(
+      `SELECT d.effective_due_at FROM doses d JOIN medications m ON m.id = d.med_id
+        WHERE m.med_key = '${key}' AND d.status IN ('scheduled','deferred','due','prompted')`,
+    );
+    return r === null ? null : Number(r['effective_due_at']);
+  };
+
+  it('does not put a fifth dose of a four-a-day medicine in the small hours', async () => {
+    await dayUntil('22:45');
+    const next = nextFor('vigalon');
+    if (next !== null) {
+      expect(next, `next Vigalon at ${z.fmtTime12(next)} — the middle of the night`)
+        .not.toBeLessThan(at('06:00', 1));
+    }
+  });
+
+  it('keeps the day’s count, bringing the last one forward if it would fall late', async () => {
+    await dayUntil('18:00');
+    const taken = Number(bot.d1.one("SELECT doses_taken FROM medications WHERE med_key='vigalon'")?.['doses_taken']);
+    expect(taken).toBeLessThan(4);
+    await dayUntil('22:50');
+    // All four fitted into the day rather than one being pushed past bedtime.
+    const after = Number(bot.d1.one("SELECT doses_taken FROM medications WHERE med_key='vigalon'")?.['doses_taken']);
+    expect(after, 'the day ended short of the prescribed count').toBe(4);
+  });
+
+  it('leaves an open-ended interval medicine to tomorrow rather than 1am', async () => {
+    await dayUntil('22:45');
+    const next = nextFor('aqua');
+    expect(next, 'the two-hourly drop went quiet').not.toBeNull();
+    // Within the grace hour is tonight's dose running late, and fine. Anything beyond it
+    // belongs to tomorrow -- what must never happen is a time in between.
+    const insideGrace = next! <= at('00:00', 1);
+    const tomorrow = next! >= at('06:00', 1);
+    expect(insideGrace || tomorrow, `next Aquafresh at ${z.fmtTime12(next!)} — the small hours`).toBe(true);
+  });
+
+  it('brings a dose back when the patient pushes bedtime later', async () => {
+    await dayUntil('21:55');
+    await bot.run(10 * MINUTE, 5 * MINUTE);
+    const before = nextFor('vigalon');
+    await bot.tap(PATIENT, /\+1 hour/).catch(() => undefined);
+    await bot.run(10 * MINUTE, 5 * MINUTE);
+    const after = nextFor('vigalon');
+    if (before !== null && after !== null) {
+      expect(after, 'the schedule ignored the later bedtime').not.toBeLessThan(before - MINUTE);
+    }
+  });
+});

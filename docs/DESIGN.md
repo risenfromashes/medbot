@@ -121,9 +121,20 @@ moment someone is actually thinking about going to sleep. Every shift moves the 
 and restarts the same two prompts against the new time, as often as they like. Answering
 nothing leaves it where it is.
 
-A dose that would otherwise land after the expected bedtime is **brought forward** to half
-an hour before it rather than discarded: four times a day means four times in the day you
-are actually having. The min-gap floor is the one thing that can refuse.
+A dose the schedule wants to put after the expected bedtime is handled by what the
+prescription actually asked for. It is **brought forward** if it lands within the grace
+hour -- tonight's dose running a little late -- or if the prescription asked for a *count*
+and today's count is not met: four times a day means four times in the day you are having,
+so the fourth belongs before bed. Anything else **belongs to tomorrow and is not shown**.
+"Every two hours" does not mean a dose at quarter past three; that is the first of the next
+day, not a late one. The min-gap floor is the only thing that can refuse a bring-forward,
+and it is never overridden.
+
+This is recomputed every tick from the schedule's own intent, so pushing bedtime back
+brings the dose back with it -- the "unless they say they are staying up" case, without a
+separate mechanism for it. The count itself now survives import: `times_per_day` used to be
+compiled to an interval and the number thrown away, which is exactly how a four-a-day drop
+came to have a fifth dose at three in the morning.
 
 Once the expected bedtime passes with no word, sleep is assumed -- but **outstanding
 reminders carry on for a grace hour**. A dose that was already being chased keeps being

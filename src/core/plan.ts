@@ -359,29 +359,44 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
       }
     }
 
-    // A dose that would land after tonight's bedtime is brought forward to just before
-    // it, not left to be discarded. Four times a day means four times in the day you are
-    // actually having: if the fourth would fall at half past one and you are turning in at
-    // one, it belongs at half past midnight, where you can still take it. The min-gap
-    // floor is the one thing that can refuse -- it is never overridden.
+    // What to do with a dose the schedule wants to put after tonight's bedtime.
+    //
+    // Two reasons to pull it forward rather than let it fall there. It lands inside the
+    // grace hour, so it is really tonight's dose running a little late. Or the
+    // prescription asked for a *count* -- four times a day -- and today's four are not
+    // done: the fourth belongs before bed, not at quarter past three in the morning.
+    //
+    // Everything else belongs to tomorrow and is not shown at all. "Every two hours"
+    // means every two hours of the day you are having, and a dose three hours past
+    // bedtime is not a late dose, it is the first of the next day. This is recomputed
+    // every tick from the schedule's own intent, so pushing bedtime back brings the dose
+    // back with it -- the "unless they say they are staying up" case.
     if (
       med.awakeOnly && !med.critical && facts.awake &&
-      typeof facts.sleepFrom === 'number' &&
+      typeof facts.sleepFrom === 'number' && typeof facts.wakeNext === 'number' &&
       (live.status === 'scheduled' || live.status === 'due') &&
       live.takenAt === null &&
-      live.effectiveDueAt > facts.sleepFrom - BEDTIME_MARGIN &&
-      live.effectiveDueAt < facts.sleepFrom + 6 * HOUR
+      live.plannedDueAt > facts.sleepFrom - BEDTIME_MARGIN
     ) {
-      const wanted = facts.sleepFrom - BEDTIME_MARGIN;
-      const floor = Math.max(
-        med.lastTakenAt === null ? -Infinity : med.lastTakenAt + med.minGapMs,
-        med.lastCycleStartAt === null ? -Infinity : med.lastCycleStartAt + med.minGapMs,
-        now,
-      );
-      const moved = Math.max(wanted, floor);
-      if (moved < live.effectiveDueAt - MINUTE) {
-        emit({ t: 'retimeDose', doseId: live.id, effectiveDueAt: moved });
-        live = { ...live, effectiveDueAt: moved };
+      const counter = state.dayCounters.get(med.id);
+      const doneToday = (counter?.taken ?? 0) + (counter?.missed ?? 0);
+      const quota = med.spec.dosesPerDay ?? null;
+      const withinGrace = live.plannedDueAt <= facts.sleepFrom + p.postBedGraceMs;
+      const owedToday = quota !== null && doneToday < quota;
+
+      // The min-gap floor is the one thing that can refuse, and it is never overridden.
+      const desired = withinGrace || owedToday
+        ? Math.max(
+            facts.sleepFrom - BEDTIME_MARGIN,
+            med.lastTakenAt === null ? -Infinity : med.lastTakenAt + med.minGapMs,
+            med.lastCycleStartAt === null ? -Infinity : med.lastCycleStartAt + med.minGapMs,
+            now,
+          )
+        : Math.max(facts.wakeNext, live.plannedDueAt);
+
+      if (Math.abs(desired - live.effectiveDueAt) > MINUTE) {
+        emit({ t: 'retimeDose', doseId: live.id, effectiveDueAt: desired });
+        live = { ...live, effectiveDueAt: desired };
       }
     }
 
