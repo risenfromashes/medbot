@@ -15,7 +15,9 @@ import { tempIds } from './domain.js';
 import { planMeals } from './planMeals.js';
 import { planWake } from './planWake.js';
 import { planReports } from './planReport.js';
-import { activePhase, courseComplete, effectiveMed, nextDue, reviveAtWake, rollForwardAfter } from './planSchedule.js';
+import {
+  activePhase, clampToBedtime, courseComplete, effectiveMed, nextDue, reviveAtWake, rollForwardAfter,
+} from './planSchedule.js';
 import { applySpacing } from './planGroups.js';
 import { sanitizeMedicine, sanitizePatient, saneNagSteps } from './sanitize.js';
 import { advanceMedicine } from './advance.js';
@@ -30,9 +32,6 @@ import { esc } from './html.js';
  * checklist. Spacing-group steps are exempt -- their whole point is to be separated.
  */
 const MERGE_WINDOW = 5 * MINUTE;
-
-/** How long before bedtime a brought-forward dose is placed, so there is time to take it. */
-const BEDTIME_MARGIN = 30 * MINUTE;
 
 export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
   // Everything downstream assumes sane numbers and readable times. One malformed row
@@ -103,7 +102,9 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
     state,
     now,
     z,
-    today,
+    // The waking day again: recording tonight's dinner against tomorrow's date would make
+    // it invisible to the very tick that just asked about it.
+    wake.state === 'awake' ? z.localDay(wake.wakeAnchor) : today,
     wake.state === 'awake',
     emitWatching,
     (meal, stage) => openPrompts.some((q) => q.kind === 'meal' && q.body.meal === meal && q.body.stage === stage),
@@ -144,6 +145,8 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
     localDay: today,
     sleepFrom,
     wakeNext,
+    postBedGraceMs: p.postBedGraceMs,
+    dosesSinceWake: state.dosesSinceWake,
     meals: mealFacts.meals,
     skipped: mealFacts.skipped,
   };
@@ -168,7 +171,8 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
     // A tapering course changes schedule partway through, so everything below works on
     // the medicine as it behaves *today*, not as it was first prescribed.
     const phase = activePhase(rawMed, z, today);
-    if (rawMed.phases !== null && phase.index !== rawMed.phaseIndex && !phase.done) {
+    const phaseChanged = rawMed.phases !== null && phase.index !== rawMed.phaseIndex && !phase.done;
+    if (phaseChanged) {
       emit({
         t: 'advancePhase',
         medId: rawMed.id,
@@ -188,6 +192,15 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
 
     let med = effectiveMed(rawMed, z, today);
     let live = liveByMed.get(med.id) ?? null;
+
+    // A phase advance cancels whatever was scheduled under the old phase. Leaving the
+    // stale dose in hand meant this pass believed the medicine was covered and created
+    // nothing, so it had no live dose at all until the next tick -- a gap /status
+    // reported as "working out the next one" and a minute in which nothing was pending.
+    if (phaseChanged && live !== null) {
+      if (live.promptId !== null) emit({ t: 'closePrompt', promptId: live.promptId, state: 'cancelled', at: now });
+      live = null;
+    }
 
     // Roll-forward. The bot never stops nagging, but an unanswered prompt must never be
     // able to wedge a medicine: once the next dose would have been due, log the old one
@@ -359,48 +372,19 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
       }
     }
 
-    // What to do with a dose the schedule wants to put after tonight's bedtime.
-    //
-    // Two reasons to pull it forward rather than let it fall there. It lands inside the
-    // grace hour, so it is really tonight's dose running a little late. Or the
-    // prescription asked for a *count* -- four times a day -- and today's four are not
-    // done: the fourth belongs before bed, not at quarter past three in the morning.
-    //
-    // Everything else belongs to tomorrow and is not shown at all. "Every two hours"
-    // means every two hours of the day you are having, and a dose three hours past
-    // bedtime is not a late dose, it is the first of the next day. This is recomputed
-    // every tick from the schedule's own intent, so pushing bedtime back brings the dose
-    // back with it -- the "unless they say they are staying up" case.
-    if (
-      med.awakeOnly && !med.critical && facts.awake &&
-      typeof facts.sleepFrom === 'number' && typeof facts.wakeNext === 'number' &&
-      (live.status === 'scheduled' || live.status === 'due') &&
-      live.takenAt === null &&
-      live.plannedDueAt > facts.sleepFrom - BEDTIME_MARGIN
-    ) {
-      // Counted against the waking day, not the calendar one. A dose brought forward to
-      // ten past midnight falls on the following date while plainly belonging to the day
-      // before it, and counting by date said three when four had been taken -- so the
-      // schedule offered a fifth.
-      const doneToday = state.dosesSinceWake.get(med.id) ?? 0;
-      const quota = med.spec.dosesPerDay ?? null;
-      const graceEnd = facts.sleepFrom + p.postBedGraceMs;
-      const withinGrace = live.plannedDueAt <= graceEnd;
-      const owedToday = quota !== null && doneToday < quota;
-
-      // The min-gap floor is the one thing that can refuse, and it is never overridden.
-      const pulled = Math.max(
-        facts.sleepFrom - BEDTIME_MARGIN,
+    // And again every tick, in case bedtime has moved since. Computed from the schedule's
+    // own intent rather than from the last answer, so it is idempotent -- and so pushing
+    // bedtime back brings the dose back with it.
+    if ((live.status === 'scheduled' || live.status === 'due') && live.takenAt === null && live.step === 0) {
+      // The safety floor is reapplied before clamping. Re-deriving from the plan alone
+      // would quietly undo it: a dose the min-gap had pushed later would be dragged back
+      // to its planned time, and two doses would land ten minutes apart.
+      const floor = Math.max(
+        live.plannedDueAt,
         med.lastTakenAt === null ? -Infinity : med.lastTakenAt + med.minGapMs,
         med.lastCycleStartAt === null ? -Infinity : med.lastCycleStartAt + med.minGapMs,
-        now,
       );
-      // And if the gap will not allow it before the grace hour is out, it was never a
-      // bring-forward: ten past four in the morning is not "before bed", it is tomorrow.
-      const desired = (withinGrace || owedToday) && pulled <= graceEnd
-        ? pulled
-        : Math.max(facts.wakeNext, live.plannedDueAt);
-
+      const desired = clampToBedtime(med, floor, facts, now);
       if (Math.abs(desired - live.effectiveDueAt) > MINUTE) {
         emit({ t: 'retimeDose', doseId: live.id, effectiveDueAt: desired });
         live = { ...live, effectiveDueAt: desired };
@@ -446,6 +430,24 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
 
   // --- 3b. keep spaced medicines apart ------------------------------------
   applySpacing(settled, now, emit);
+
+  // Spacing is the last thing that can move a dose, and it knows nothing about bedtime:
+  // three drops staggered ten minutes apart can walk the last one over the line. So the
+  // rule is applied once more, here, where nothing else will touch the time again. One
+  // guarantee in one place beats four creation paths each remembering to be careful.
+  for (const item of settled) {
+    const { med } = item;
+    const d = item.dose;
+    // Not mid-cycle steps: the ten minutes between two drops is a step gap, and the
+    // min-gap the clamp respects governs the space between cycles, not inside one.
+    if (d.step > 0) continue;
+    if (d.takenAt !== null || (d.status !== 'scheduled' && d.status !== 'due')) continue;
+    const clamped = clampToBedtime(med, d.effectiveDueAt, facts, now);
+    if (Math.abs(clamped - d.effectiveDueAt) > MINUTE) {
+      emit({ t: 'retimeDose', doseId: d.id, effectiveDueAt: clamped });
+      item.dose = { ...d, effectiveDueAt: clamped };
+    }
+  }
 
   for (const item of settled) {
     const { med } = item;

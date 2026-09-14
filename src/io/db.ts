@@ -161,7 +161,7 @@ export class Db {
 
   // --- the planner snapshot ----------------------------------------------
 
-  async loadState(patientId: number, today: string): Promise<PatientState | null> {
+  async loadState(patientId: number, today: string, mealDay = today): Promise<PatientState | null> {
     const batched = await this.d1.batch<Row>([
         this.d1.prepare('SELECT * FROM patients WHERE id = ?1').bind(patientId),
         this.d1.prepare('SELECT * FROM chats WHERE patient_id = ?1 AND active = 1').bind(patientId),
@@ -174,7 +174,9 @@ export class Db {
           .bind(patientId),
         this.d1.prepare("SELECT * FROM prompts WHERE patient_id = ?1 AND state = 'open'").bind(patientId),
         this.d1.prepare('SELECT * FROM meal_defs WHERE patient_id = ?1').bind(patientId),
-        this.d1.prepare('SELECT * FROM meal_events WHERE patient_id = ?1 AND local_day = ?2').bind(patientId, today),
+        // Meals belong to the waking day. Someone still up at half past midnight has not
+        // had a fresh breakfast, lunch and dinner to answer for.
+        this.d1.prepare('SELECT * FROM meal_events WHERE patient_id = ?1 AND local_day = ?2').bind(patientId, mealDay),
         this.d1.prepare('SELECT * FROM day_counters WHERE patient_id = ?1 AND local_day = ?2').bind(patientId, today),
         // The waking day, which is what "four times a day" actually means.
         this.d1
@@ -253,6 +255,18 @@ export class Db {
         );
       } else if (a.t === 'setDoseStatus' && !['scheduled', 'deferred', 'due', 'prompted'].includes(a.status)) {
         vacating.push(this.d1.prepare('UPDATE doses SET status = ?2 WHERE id = ?1').bind(a.doseId, a.status));
+      } else if (a.t === 'advancePhase') {
+        // A taper stepping down cancels what the old phase had scheduled, and the planner
+        // creates the replacement in the same pass. The cancel therefore has to clear the
+        // one-live-dose index before the insert, or the whole tick fails on it.
+        vacating.push(
+          this.d1
+            .prepare(
+              `UPDATE doses SET status = 'cancelled', resolved_at = ?2, resolution_src = 'import'
+                WHERE med_id = ?1 AND status IN ('scheduled','deferred','due','prompted')`,
+            )
+            .bind(a.medId, now),
+        );
       }
     }
     if (vacating.length > 0) await this.d1.batch(vacating);
@@ -436,13 +450,8 @@ export class Db {
         case 'advancePhase':
           rest.push(
             this.d1.prepare('UPDATE medications SET phase_index = ?2 WHERE id = ?1').bind(a.medId, a.phaseIndex),
-            // The dose already scheduled under the previous phase is no longer right.
-            this.d1
-              .prepare(
-                `UPDATE doses SET status = 'cancelled', resolved_at = ?2, resolution_src = 'import'
-                 WHERE med_id = ?1 AND status IN ('scheduled','deferred','due','prompted')`,
-              )
-              .bind(a.medId, now),
+            // The dose the old phase had scheduled is cancelled in the vacating pass above,
+            // so the replacement can be inserted in this same batch.
             this.d1
               .prepare('INSERT INTO audit_log (patient_id, at, kind, med_id, actor, detail_json) VALUES (?1,?2,?3,?4,?5,?6)')
               .bind(pid, now, 'phase_advanced', a.medId, 'system', JSON.stringify({ phaseIndex: a.phaseIndex, label: a.label })),

@@ -207,23 +207,3 @@ export function planWake(
         : null,
   };
 }
-
-/**
- * Apply an explicit wake/sleep declaration, including a retrospective one.
- * Returns the actions; the caller decides what to do about medicines that were parked.
- */
-export function declareWake(
-  kind: 'wake' | 'sleep',
-  at: number,
-  source: string,
-): Action[] {
-  return [
-    {
-      t: 'setWake',
-      state: kind === 'wake' ? 'awake' : 'asleep',
-      confidence: 'confirmed',
-      at,
-      source,
-    },
-  ];
-}

@@ -277,8 +277,9 @@ export function patientPage(data: {
       <div class="row" style="margin-bottom:10px">${wakeChip(p, now)}
         <span class="chip">${esc(z.fmtTime12(now))} local</span>
         <span class="chip">${esc(p.tz)}</span></div>
-      <div class="small muted">Day runs ${esc(p.morningPollAt)}–${esc(p.eveningPollAt)} ·
-        presumed awake by ${esc(p.presumedWakeAt)} · presumed asleep by ${esc(p.presumedSleepAt)}</div>
+      <div class="small muted">Asks from ${esc(p.morningPollAt)} — waking is never assumed ·
+        usual bedtime ${esc(p.presumedSleepAt)}${p.expectedSleepAt === null ? '' :
+          `, tonight ${esc(z.fmtTime12(p.expectedSleepAt))}`}</div>
     </div>
 
     <div class="card"><h2>Medicines</h2>

@@ -637,7 +637,7 @@ function parseSchedule(
           `${active.length} doses across your waking hours instead of tying them to meals` +
           ' -- /edit can change that',
       );
-      return wakeSpread('08:00', '22:00', active.length);
+      return wakeSpread(SPREAD_FROM, SPREAD_TO, active.length);
     }
 
     if (active.length === 1) {
@@ -708,8 +708,8 @@ function parseSchedule(
       c.err(where, 'a times_per_day schedule needs "n", e.g. "n": 3');
       return null;
     }
-    const from = c.wall(where, 'schedule.from', sr['from'], '08:00')!;
-    const to = c.wall(where, 'schedule.to', sr['to'], '22:00')!;
+    const from = c.wall(where, 'schedule.from', sr['from'], SPREAD_FROM)!;
+    const to = c.wall(where, 'schedule.to', sr['to'], SPREAD_TO)!;
 
     // "Four times a day" for someone recovering at home means four times across their
     // waking day, not at four fixed times regardless of when that day began. Anchoring on
@@ -779,6 +779,16 @@ function parseSchedule(
  * from the bot lands on exactly the schedule an import of the same number would have
  * produced. Two ways of computing it would eventually disagree.
  */
+/**
+ * The window "n times a day" is spread across, when the prescription does not say.
+ *
+ * Deliberately narrower than most people's waking day. The doses are anchored on when
+ * the patient actually gets up, so a window with no slack in it overflows past bedtime
+ * the moment they lie in -- and the last dose of the day is the one that gets lost.
+ */
+export const SPREAD_FROM = '08:00';
+export const SPREAD_TO = '22:00';
+
 export function dosesPerDayInterval(from: string, to: string, n: number): number {
   if (n <= 1) return 24 * HOUR;
   const a = parseWall(from);

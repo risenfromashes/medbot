@@ -14,8 +14,16 @@ import type { Medicine, Patient } from './domain.js';
 import type { LocalDay, Zone } from './tz.js';
 import { DAY_MS, HOUR, MINUTE, tryParseWall } from './tz.js';
 
-/** The patient's waking day, in milliseconds, from their own settings. */
-export function wakingSpanMs(patient: Patient): number {
+/**
+ * The patient's waking day, in milliseconds, from their own settings.
+ *
+ * From where the bot starts asking whether they are up, to their usual bedtime.
+ *
+ * This is for *counting* doses, not for spacing them -- spacing uses the narrower window
+ * in `prescription.ts`, which leaves a late riser some headroom. And it is only a
+ * fallback: a prescription that gave a count says so outright, and that wins.
+ */
+export function wakingSpanMs(patient: Pick<Patient, 'morningPollAt' | 'presumedSleepAt'>): number {
   const wake = tryParseWall(patient.morningPollAt) ?? { h: 7, mi: 0 };
   const sleep = tryParseWall(patient.presumedSleepAt) ?? { h: 23, mi: 0 };
   let span = (sleep.h * 60 + sleep.mi) - (wake.h * 60 + wake.mi);
@@ -23,6 +31,7 @@ export function wakingSpanMs(patient: Patient): number {
   // A day with no room in it would make every count either zero or enormous.
   return Math.min(Math.max(span * MINUTE, 6 * HOUR), 20 * HOUR);
 }
+
 
 /**
  * Doses of this medicine in a day.
@@ -32,6 +41,9 @@ export function wakingSpanMs(patient: Patient): number {
  * and why this is not simply 24h / interval.
  */
 export function dosesPerDay(med: Medicine, patient: Patient): number {
+  // What the prescription asked for, when it said so as a count. Deriving it from the
+  // interval instead let /status disagree with the scheduler about the same medicine.
+  if (med.spec.dosesPerDay !== undefined && med.spec.dosesPerDay > 0) return med.spec.dosesPerDay;
   switch (med.kind) {
     case 'interval': {
       const interval = med.intervalMs ?? 0;

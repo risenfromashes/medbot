@@ -40,7 +40,7 @@ describe('the published command menu', () => {
     const unlisted = new Set([
       'wokeup', 'up', 'bed', 'goodnight', 'eaten', 'take', 'taken', 'medicines',
       'prescription', 'adherence', 'timezone', 'watch', 'unwatch', 'set', 'new',
-      'template', 'json', 'plan', 'callme', 'rename', 'start', 'health', 'add',
+      'template', 'json', 'plan', 'callme', 'rename', 'start', 'health', 'add', 'tonight',
     ]);
     const published = new Set(COMMANDS.map((c) => c.command));
 

@@ -12,7 +12,7 @@
 
 import type { Medicine, PatientState, Phase } from './domain.js';
 import type { LocalDay, Zone } from './tz.js';
-import { DAY_MS, HOUR } from './tz.js';
+import { DAY_MS, HOUR, MINUTE } from './tz.js';
 
 export interface DayFacts {
   /** Where the day's wake anchor sits, for `anchor: 'wake'` medicines. */
@@ -29,6 +29,10 @@ export interface DayFacts {
    */
   sleepFrom?: number | null;
   wakeNext?: number | null;
+  /** How long outstanding reminders keep going past the expected bedtime. */
+  postBedGraceMs?: number;
+  /** Doses resolved since the patient got up, per medicine -- the day's running count. */
+  dosesSinceWake?: Map<number, number>;
   /** Resolved or predicted instants for each meal, keyed by meal id. */
   meals: Map<string, { at: number; confirmed: boolean }>;
   /** Meals the patient has said they are not having today. */
@@ -216,6 +220,51 @@ function rawCycleStart(
   }
 }
 
+/** How long before bedtime a brought-forward dose is placed, so there is time to take it. */
+const BEDTIME_MARGIN = 30 * MINUTE;
+
+/**
+ * Where a dose belongs when the schedule wants to put it after tonight's bedtime.
+ *
+ * Two reasons to pull it forward. It lands inside the grace hour, so it is really
+ * tonight's dose running late. Or the prescription asked for a *count* -- four times a
+ * day -- and today's four are not done: the fourth belongs before bed, not at quarter
+ * past three in the morning.
+ *
+ * Everything else belongs to tomorrow. "Every two hours" means every two hours of the day
+ * you are having; a dose three hours past bedtime is the first of the next day, not a late
+ * one. And if the min-gap will not allow the pull-forward inside the grace hour, it was
+ * never a pull-forward at all -- ten past four is not "before bed" either.
+ *
+ * One function because there are two callers: the moment a dose is created, and every tick
+ * afterwards in case bedtime has moved. They used to be one rule and no rule, which left
+ * a dose sitting at one in the morning until the next planning pass corrected it -- long
+ * enough for /status to show it.
+ */
+export function clampToBedtime(med: Medicine, at: number, facts: DayFacts, now: number): number {
+  if (!med.awakeOnly || med.critical) return at;
+  if (typeof facts.sleepFrom !== 'number' || typeof facts.wakeNext !== 'number') return at;
+
+  // Already asleep: there is no bedtime left to negotiate, only a night to skip.
+  if (!facts.awake) {
+    return at >= facts.sleepFrom && at < facts.wakeNext ? facts.wakeNext : at;
+  }
+  if (at <= facts.sleepFrom - BEDTIME_MARGIN) return at;
+
+  const graceEnd = facts.sleepFrom + (facts.postBedGraceMs ?? 0);
+  const quota = med.spec.dosesPerDay ?? null;
+  const owedToday = quota !== null && (facts.dosesSinceWake?.get(med.id) ?? 0) < quota;
+
+  // The min-gap floor is the one thing that can refuse, and it is never overridden.
+  const pulled = Math.max(
+    facts.sleepFrom - BEDTIME_MARGIN,
+    med.lastTakenAt === null ? -Infinity : med.lastTakenAt + med.minGapMs,
+    med.lastCycleStartAt === null ? -Infinity : med.lastCycleStartAt + med.minGapMs,
+    now,
+  );
+  return (at <= graceEnd || owedToday) && pulled <= graceEnd ? pulled : Math.max(facts.wakeNext, at);
+}
+
 /**
  * How long an unanswered dose is allowed to stay pending before it rolls forward.
  *
@@ -324,24 +373,9 @@ export function nextDue(
     effective = Math.max(effective, med.lastTakenAt + Math.min(med.minGapMs, med.stepSpacingMs || med.minGapMs));
   }
 
-  // Skip the night -- but only a night that is actually happening.
-  //
-  // While the patient is asleep, a dose landing before they are expected up is moved to
-  // the morning: /status says "tomorrow morning" rather than naming a time in the small
-  // hours, and nothing sits pending through them.
-  //
-  // While they are awake it is a prediction, and predictions do not get to delete doses.
-  // Writing off a dose due at ten past one because the clock says bedtime is one o'clock
-  // assumes a night that has not begun -- the patient may well still be up, and if they
-  // are not, the dose parks itself the moment it comes due and revives when they wake.
-  // Deferral is the honest version of this; skipping ahead of the fact is a guess.
-  if (
-    med.awakeOnly && !med.critical && facts.awake === false &&
-    typeof facts.sleepFrom === 'number' && typeof facts.wakeNext === 'number' &&
-    effective >= facts.sleepFrom && effective < facts.wakeNext
-  ) {
-    effective = facts.wakeNext;
-  }
+  // Keep it out of the night: either just before bedtime, or over to tomorrow. Applied
+  // here, at creation, so a time nobody would take a dose at is never written down.
+  effective = clampToBedtime(med, effective, facts, now);
 
   // Daily cap, counted in the patient's local days, not rolling 24-hour windows.
   if (med.maxPerDay !== null) {

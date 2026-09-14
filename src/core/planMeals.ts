@@ -19,7 +19,7 @@
  * that someone who answers nothing still gets their medicines.
  */
 
-import type { Action, MealDef, MealEvent, PatientState } from './domain.js';
+import type { Action, MealDef, PatientState } from './domain.js';
 import type { LocalDay, Zone } from './tz.js';
 import { HOUR, MINUTE, tryParseWall } from './tz.js';
 
@@ -251,17 +251,4 @@ export function planMeals(
 
   const future = wakeUps.filter((v) => Number.isFinite(v) && v > now);
   return { meals, skipped, wakeAt: future.length > 0 ? Math.min(...future) : null };
-}
-
-/** How a planned meal time is derived from "in about an hour". */
-export function plannedMealAt(now: number, inMs: number): number {
-  return now + Math.max(0, Math.min(inMs, 12 * HOUR));
-}
-
-export function mealEventFor(
-  state: PatientState,
-  meal: string,
-  today: LocalDay,
-): MealEvent | undefined {
-  return state.mealEvents.find((e) => e.meal === meal && e.localDay === today);
 }

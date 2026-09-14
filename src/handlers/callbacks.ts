@@ -12,7 +12,7 @@ import { decodeCallback } from '../core/callbackCodec.js';
 import { renderConfirmation, renderEarlierMenu, renderWokeEarlierMenu } from '../core/render.js';
 import { HOUR, MINUTE, fmtDuration, zoneFor } from '../core/tz.js';
 import { parseDuration } from '../core/timeparse.js';
-import { dosesPerDayInterval } from '../core/prescription.js';
+import { SPREAD_FROM, SPREAD_TO, dosesPerDayInterval } from '../core/prescription.js';
 import { Db } from '../io/db.js';
 import { Telegram, esc } from '../io/telegram.js';
 import { broadcast, clearPromptMessages } from './dispatch.js';
@@ -503,13 +503,19 @@ async function applyEdit(
       if (!Number.isInteger(n) || n < 1 || n > 12) return null;
       const patient = await db.getPatient(med.patientId);
       if (patient === null) return null;
-      const ms = dosesPerDayInterval(patient.morningPollAt, patient.eveningPollAt, n);
+      // The importer's own function and window. These were two different calculations --
+      // morning-to-evening-poll here, a fixed 08:00-22:00 at import -- so "4 times a day"
+      // meant one thing in a prescription and another through this menu.
+      void patient;
+      const ms = dosesPerDayInterval(SPREAD_FROM, SPREAD_TO, n);
       await db.updateMed(
         medId,
         {
           intervalMs: ms,
           minGapMs: Math.min(med.minGapMs, Math.floor(ms * 0.75)),
-          spec: { kind: 'interval', intervalMs: ms, anchor: 'wake' },
+          // The count travels with it, or the next edit silently un-teaches the bot that
+          // this is a three-a-day medicine and it starts planning a fourth past bedtime.
+          spec: { kind: 'interval', intervalMs: ms, anchor: 'wake', dosesPerDay: n },
         },
         { rescheduleNow: true },
         now,

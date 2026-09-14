@@ -12,6 +12,8 @@ export interface SentMessage {
   method: string;
   chatId: number;
   text: string;
+  /** When it went out, so a test can look at just this tick's traffic. */
+  at: number;
   buttons: Array<Array<{ text: string; callback_data: string }>>;
 }
 
@@ -60,6 +62,7 @@ export class Bot {
           method,
           chatId: Number(body['chat_id']),
           text: String(body['text'] ?? ''),
+          at: this.now,
           buttons: ((body['reply_markup'] as { inline_keyboard?: SentMessage['buttons'] } | undefined)?.inline_keyboard) ?? [],
         });
         return this.ok({ message_id: this.messageId++, chat: { id: Number(body['chat_id']) } });

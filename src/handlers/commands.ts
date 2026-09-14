@@ -17,7 +17,7 @@ import { parseDuration, parseTime, splitTrailingTime } from '../core/timeparse.j
 import { remainingFor, summarise } from '../core/remaining.js';
 import { looksLikeRealName } from '../core/names.js';
 import { wakeOffsets } from '../core/planMeals.js';
-import { HOUR, MINUTE, fmtDuration, isValidTimeZone, parseWall, zoneFor } from '../core/tz.js';
+import { DAY_MS, HOUR, MINUTE, fmtDuration, isValidTimeZone, parseWall, zoneFor } from '../core/tz.js';
 import type { Zone } from '../core/tz.js';
 import { Db } from '../io/db.js';
 import { AdminDb } from '../io/adminDb.js';
@@ -31,6 +31,7 @@ export const COMMANDS = [
   { command: 'took', description: 'Log a dose — optionally at a past time, e.g. /took drops 5pm' },
   { command: 'awake', description: "Start the day (accepts a time, e.g. /awake 6:30am)" },
   { command: 'sleep', description: 'End the day' },
+  { command: 'bedtime', description: "Set tonight's bedtime, e.g. /bedtime 12:30am" },
   { command: 'ate', description: 'Record a meal, e.g. /ate lunch 1pm' },
   { command: 'eating', description: "Say when you'll eat, e.g. /eating lunch in 1h" },
   { command: 'meds', description: 'List medicines and their schedules' },
@@ -256,6 +257,7 @@ export async function handleCommand(ctx: CmdCtx, msg: TgIncomingMessage): Promis
     case 'help': return cmdHelp(ctx);
     case 'awake': case 'wokeup': case 'up': return cmdWake(ctx, 'wake', args);
     case 'sleep': case 'bed': case 'goodnight': return cmdWake(ctx, 'sleep', args);
+    case 'bedtime': case 'tonight': return cmdBedtime(ctx, args);
     case 'ate': case 'eaten': return cmdAte(ctx, args);
     case 'eating': case 'plan': return cmdEating(ctx, args);
     case 'took': case 'take': case 'taken': return cmdTook(ctx, args);
@@ -608,6 +610,70 @@ async function cmdCaregiver(ctx: CmdCtx, args: string): Promise<void> {
 }
 
 // --- day state -----------------------------------------------------------
+
+/**
+ * "Tonight I'm turning in at half twelve."
+ *
+ * Tonight only. `/settings sleep` changes the routine -- the hour the bot starts from
+ * every evening -- and most of the time what someone means is just this once: a late
+ * film, an early start tomorrow. Conflating the two means every exception quietly
+ * rewrites the rule.
+ *
+ * Everything recalculates from the new time: the two questions before it, what gets
+ * brought forward to fit before it, and what is left to tomorrow.
+ */
+async function cmdBedtime(ctx: CmdCtx, args: string): Promise<void> {
+  const ap = await acting(ctx, args, 'bedtime');
+  if (ap === null) return;
+  const { patient, z } = ap;
+  const rest = ap.rest.trim();
+
+  if (rest === '') {
+    const current = patient.expectedSleepAt ?? z.nextWallAtOrAfter(patient.presumedSleepAt, ctx.now);
+    await reply(
+      ctx,
+      `🌙 Tonight I'm expecting you to turn in around <b>${z.fmtTime12(current)}</b>.\n\n` +
+        `Change it for tonight with <code>/bedtime 12:30am</code>, or for good with ` +
+        `<code>/settings sleep 00:30</code>.`,
+    );
+    return;
+  }
+
+  // A bedtime is the next occurrence of that wall time -- "half twelve" said at eleven
+  // at night means tonight, not thirteen hours ago.
+  let at: number;
+  try {
+    const { h, mi } = parseWall(rest);
+    at = z.nextWallAtOrAfter(`${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}`, ctx.now);
+  } catch {
+    const parsed = parseTime(rest, ctx.now, z);
+    if (parsed === null) {
+      await reply(ctx, `I couldn't read "${esc(rest)}" as a time. Try <code>/bedtime 12:30am</code>.`);
+      return;
+    }
+    at = parsed.at <= ctx.now ? parsed.at + DAY_MS : parsed.at;
+  }
+
+  if (at > ctx.now + 20 * HOUR) {
+    await reply(ctx, "That's more than a day away — did you mean tonight?");
+    return;
+  }
+
+  await ctx.db.setExpectedSleep(patient.id, at, ctx.now);
+  for (const q of await ctx.db.openPromptsFor(patient.id)) {
+    if (q.kind !== 'sleep') continue;
+    await ctx.db.closePrompt(q.id, 'resolved', ctx.now);
+    await clearPromptMessages({ db: ctx.db, tg: ctx.tg, z, now: ctx.now }, q.id);
+  }
+
+  await reply(
+    ctx,
+    `🌙 Bedtime tonight: <b>${z.fmtTime12(at)}</b>${onBehalf(ap)}.\n\n` +
+      `I'll fit what I can before it and check in beforehand. ` +
+      `<i>Your usual ${esc(patient.presumedSleepAt)} is unchanged — <code>/settings sleep</code> for that.</i>`,
+  );
+  await tellTheOthers(ctx, ap, `🌙 ${esc(ctx.userName)} set tonight's bedtime to ${z.fmtTime12(at)}.`);
+}
 
 /**
  * The shortest stretch of being up that counts as a day.
@@ -2306,6 +2372,7 @@ async function cmdHelp(ctx: CmdCtx): Promise<void> {
 
 <b>Every day</b>
 <code>/awake</code> · <code>/sleep</code> — start and end your day. I'll ask if you forget.
+<code>/bedtime 12:30am</code> — just for tonight; your usual time stays put.
 <code>/eating lunch in 1h</code> — so I can time the before-meal tablets.
 <code>/ate lunch</code> — once you've actually eaten.
 <code>/status</code> — what's waiting and what's next.

@@ -331,11 +331,6 @@ export function renderConfirmation(
     : `✅ <b>${esc(medLabel)}</b> — taken ${when}${by}`;
 }
 
-/** A collapsed one-liner replacing a superseded nudge, so the chat stays readable. */
-export function renderCollapsed(medLabel: string, z: Zone, dueAt: number): string {
-  return `<i>💊 ${esc(medLabel)} — reminder from ${z.fmtTime12(dueAt)}</i>`;
-}
-
 /**
  * The tap-through editor.
  *
