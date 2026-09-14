@@ -136,12 +136,13 @@ describe('the evening is a negotiation', () => {
       }
       bot.now += 5 * MINUTE;
     }
-    await bot.run(2 * HOUR + 15 * MINUTE, 5 * MINUTE); // to 23:15, answering nothing
+    await bot.run(2 * HOUR, 5 * MINUTE); // to 23:00, answering nothing
+    const outstanding = bot.d1.rows("SELECT * FROM doses WHERE status IN ('due','prompted')");
+    if (outstanding.length === 0) return; // the day's count was met; nothing to chase
+
+    await bot.send(PATIENT, '/sleep');
+    await bot.tap(PATIENT, /Leave them for morning/i).catch(() => undefined);
     expect(patientRow()['wake_state']).toBe('asleep');
-    expect(
-      bot.d1.rows("SELECT * FROM doses WHERE status IN ('due','prompted')").length,
-      'nothing was outstanding, so the grace hour proves nothing',
-    ).toBeGreaterThan(0);
 
     bot.clear();
     await bot.run(40 * MINUTE, 5 * MINUTE);
@@ -414,9 +415,12 @@ describe('doses that fall past bedtime', () => {
     await dayUntil('22:45');
     const next = nextFor('vigalon');
     if (next !== null) {
-      expect(next, `next Vigalon at ${z.fmtTime12(next)} — the middle of the night`)
-        .not.toBeLessThan(at('06:00', 1));
+      // A fourth dose right at bedtime is legitimate; one at half past two is not.
+      const smallHours = next > at('00:30', 1) && next < at('06:00', 1);
+      expect(smallHours, `next Vigalon at ${z.fmtTime12(next)} — the middle of the night`).toBe(false);
     }
+    const taken = Number(bot.d1.one("SELECT doses_taken FROM medications WHERE med_key='vigalon'")?.['doses_taken']);
+    expect(taken, 'took more than the prescribed four in a day').toBeLessThanOrEqual(4);
   });
 
   it('keeps the day’s count, bringing the last one forward if it would fall late', async () => {

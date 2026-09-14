@@ -249,11 +249,21 @@ export function clampToBedtime(med: Medicine, at: number, facts: DayFacts, now: 
   if (!facts.awake) {
     return at >= facts.sleepFrom && at < facts.wakeNext ? facts.wakeNext : at;
   }
-  if (at <= facts.sleepFrom - BEDTIME_MARGIN) return at;
-
   const graceEnd = facts.sleepFrom + (facts.postBedGraceMs ?? 0);
   const quota = med.spec.dosesPerDay ?? null;
   const owedToday = quota !== null && (facts.dosesSinceWake?.get(med.id) ?? 0) < quota;
+
+  // The day's count is already met: anything landing near or past bedtime is the first of
+  // tomorrow, whatever the arithmetic of the interval says.
+  if (quota !== null && !owedToday && at > facts.sleepFrom - BEDTIME_MARGIN) {
+    return Math.max(facts.wakeNext, at);
+  }
+
+  // Everything below is about a dose the schedule wants to put AFTER bedtime. A dose that
+  // already sits before it is left exactly where it is -- pulling it back onto the landing
+  // time collapsed three drops ten minutes apart onto one instant, which is the single
+  // thing a spacing group exists to prevent.
+  if (at <= facts.sleepFrom) return at;
 
   // The min-gap floor is the one thing that can refuse, and it is never overridden.
   const pulled = Math.max(

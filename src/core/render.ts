@@ -98,7 +98,7 @@ export function renderDosePrompt(
       { text: '⏰ 15 min', callback_data: encodeCallback({ a: 'snooze', doseId: first.dose.id, minutes: 15 }) },
     ]);
     buttons.push([
-      { text: '🕐 Taken earlier…', callback_data: encodeCallback({ a: 'earlier', doseId: first.dose.id, minutesAgo: 30 }) },
+      { text: '🕐 Taken earlier…', callback_data: encodeCallback({ a: 'earlierMenu', doseId: first.dose.id }) },
       { text: '⏭ Skip', callback_data: encodeCallback({ a: 'skip', doseId: first.dose.id }) },
     ]);
   } else {

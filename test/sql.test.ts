@@ -54,7 +54,13 @@ function countArgs(raw: string): number {
 describe('every INSERT agrees with its bindings', () => {
   for (const [name, src] of Object.entries(sources)) {
     it(`${name}`, () => {
-      const re = /INSERT INTO (\w+) \(([\s\S]*?)\)\s*\n?\s*VALUES \(([^)]*)\)/g;
+      // Only the plain `VALUES (...)` shape. A conditional
+      // `INSERT ... SELECT ?1,?2 WHERE EXISTS (...)` -- used where a write must happen
+      // only if an earlier statement in the same batch won its guard -- is left to the
+      // end-to-end tests, which run it against a real database on every tick.
+      // A column list never contains a paren, so bounding it that way stops the match
+      // running past a conditional INSERT ... SELECT into the next statement's VALUES.
+      const re = /INSERT INTO (\w+) \(([^)]*)\)\s*\n?\s*VALUES \(([^)]*)\)/g;
       let m: RegExpExecArray | null;
       let checked = 0;
       while ((m = re.exec(src)) !== null) {

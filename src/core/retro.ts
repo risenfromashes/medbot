@@ -54,13 +54,14 @@ export function resolveRetro(input: RetroInput): RetroOutcome {
   const previousTaken = recent
     .filter((d) => d.status === 'taken' && d.takenAt !== null && d.step === 0)
     .map((d) => d.takenAt!)
-    .filter((t) => t <= statedAt)
-    .sort((a, b) => b - a)[0];
+    .sort((a, b) => Math.abs(a - statedAt) - Math.abs(b - statedAt))[0];
 
+  // The nearest recorded dose in EITHER direction. Looking only backwards missed the case
+  // that matters just as much: a dose already logged at six, and "/took drops 5pm" typed
+  // afterwards, is two doses an hour apart -- and went through without a word.
   let warning: string | undefined;
   if (previousTaken !== undefined && med.minGapMs > 0) {
-    const gap = statedAt - previousTaken;
-    if (gap < med.minGapMs) warning = 'min_gap';
+    if (Math.abs(statedAt - previousTaken) < med.minGapMs) warning = 'min_gap';
   }
 
   // Which slot does the stated time actually mean? Whichever one it sits closest to.

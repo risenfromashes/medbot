@@ -314,10 +314,17 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
     // Once they do say, the dose has to follow: a tablet meant for half an hour before
     // breakfast is worthless if it stays pinned to a guess.
     if (med.kind === 'meal' && live.status !== 'deferred' && live.takenAt === null) {
-      const desired = nextDue({ ...med, lastCycleStartAt: null, nextStep: 0 }, state, facts, now, z);
+      // Re-derived with the medicine's real cursor, not a blanked one. Nulling
+      // `lastCycleStartAt` made the meal that had just been used eligible again, and
+      // `nextDue` then floored the result at exactly `lastTakenAt + minGap` -- which the
+      // `>=` below accepted. A once-daily tablet taken after breakfast was prompted again
+      // half an hour later, and again after that: one real repeat dose per min-gap.
+      const desired = nextDue({ ...med, nextStep: 0 }, state, facts, now, z);
       if (desired !== null && desired.blocked === undefined) {
         const drift = Math.abs(desired.effectiveDueAt - live.effectiveDueAt);
-        if (drift > MINUTE && desired.effectiveDueAt >= (med.lastTakenAt ?? 0) + med.minGapMs) {
+        const clearsGap =
+          med.lastTakenAt === null || desired.effectiveDueAt > med.lastTakenAt + med.minGapMs;
+        if (drift > MINUTE && clearsGap) {
           emit({
             t: 'retimeDose',
             doseId: live.id,
@@ -379,12 +386,17 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
       // The safety floor is reapplied before clamping. Re-deriving from the plan alone
       // would quietly undo it: a dose the min-gap had pushed later would be dragged back
       // to its planned time, and two doses would land ten minutes apart.
+      // A medicine already at its daily cap was deliberately pushed into tomorrow. Nothing
+      // here may drag it back: re-deriving from the plan alone did exactly that, and a
+      // three-a-day medicine took eight.
+      const capped =
+        med.maxPerDay !== null && (state.dayCounters.get(med.id)?.taken ?? 0) >= med.maxPerDay;
       const floor = Math.max(
         live.plannedDueAt,
         med.lastTakenAt === null ? -Infinity : med.lastTakenAt + med.minGapMs,
         med.lastCycleStartAt === null ? -Infinity : med.lastCycleStartAt + med.minGapMs,
       );
-      const desired = clampToBedtime(med, floor, facts, now);
+      const desired = capped ? live.effectiveDueAt : clampToBedtime(med, floor, facts, now);
       if (Math.abs(desired - live.effectiveDueAt) > MINUTE) {
         emit({ t: 'retimeDose', doseId: live.id, effectiveDueAt: desired });
         live = { ...live, effectiveDueAt: desired };
@@ -442,6 +454,7 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
     // min-gap the clamp respects governs the space between cycles, not inside one.
     if (d.step > 0) continue;
     if (d.takenAt !== null || (d.status !== 'scheduled' && d.status !== 'due')) continue;
+    if (med.maxPerDay !== null && (state.dayCounters.get(med.id)?.taken ?? 0) >= med.maxPerDay) continue;
     const clamped = clampToBedtime(med, d.effectiveDueAt, facts, now);
     if (Math.abs(clamped - d.effectiveDueAt) > MINUTE) {
       emit({ t: 'retimeDose', doseId: d.id, effectiveDueAt: clamped });

@@ -525,8 +525,13 @@ export class Db {
     const out: D1PreparedStatement[] = [
       this.d1
         .prepare(
+          // Guarded, like every other resolution. The tick loaded its snapshot a second or
+          // two ago; if the patient tapped "Taken" in between, this would rewrite the row
+          // to missed and wipe the tap out of the medical record. The race is not a remote
+          // one -- the moment the planner gives up on a dose is exactly the moment people
+          // answer it. The counter updates below are conditional on the same guard.
           `UPDATE doses SET status = ?2, taken_at = ?3, resolved_at = ?4, resolved_by_chat = ?5, resolution_src = ?6
-           WHERE id = ?1`,
+           WHERE id = ?1 AND status IN ('scheduled','deferred','due','prompted')`,
         )
         .bind(doseId, status, status === 'taken' ? takenAt : null, now, byChat, src),
     ];
@@ -534,17 +539,23 @@ export class Db {
     const med = medById.get(dose.medId);
     if (med === undefined) return out;
 
+    // Everything after the resolution is conditional on it having WON. The statements run
+    // in order within one batch, so this sees the row as the line above left it: if the
+    // patient's own tap got there first, the cursor does not move, the day's counters do
+    // not move, and no second entry lands in the record for one dose.
+    const won = `EXISTS (SELECT 1 FROM doses WHERE id = ${Math.trunc(doseId)} AND resolved_at = ${Math.trunc(now)} AND resolution_src = ?ws)`;
+
     const adv = advanceMedicine(med, dose, status, takenAt);
     out.push(
       this.d1
         .prepare(
           `UPDATE medications SET last_taken_at = ?2, last_cycle_start_at = ?3, last_planned_due_at = ?4,
              next_seq = ?5, next_step = ?6, doses_taken = ?7, doses_missed = ?8, started_at = ?9
-           WHERE id = ?1`,
+           WHERE id = ?1 AND ${won.replace('?ws', '?10')}`,
         )
         .bind(
           med.id, adv.lastTakenAt, adv.lastCycleStartAt, adv.lastPlannedDueAt,
-          adv.nextSeq, adv.nextStep, adv.dosesTaken, adv.dosesMissed, adv.startedAt,
+          adv.nextSeq, adv.nextStep, adv.dosesTaken, adv.dosesMissed, adv.startedAt, src,
         ),
     );
 
@@ -552,21 +563,26 @@ export class Db {
       out.push(
         this.d1
           .prepare(
-            `INSERT INTO day_counters (patient_id, med_id, local_day, taken, missed) VALUES (?1,?2,?3,?4,?5)
+            `INSERT INTO day_counters (patient_id, med_id, local_day, taken, missed)
+             SELECT ?1,?2,?3,?4,?5 WHERE ${won.replace('?ws', '?6')}
              ON CONFLICT (patient_id, med_id, local_day) DO UPDATE SET
                taken = taken + ?4, missed = missed + ?5`,
           )
-          .bind(state.patient.id, med.id, dose.localDay, status === 'taken' ? 1 : 0, status === 'missed' ? 1 : 0),
+          .bind(state.patient.id, med.id, dose.localDay, status === 'taken' ? 1 : 0, status === 'missed' ? 1 : 0, src),
       );
     }
 
     out.push(
       this.d1
-        .prepare('INSERT INTO audit_log (patient_id, at, kind, med_id, dose_id, actor, detail_json) VALUES (?1,?2,?3,?4,?5,?6,?7)')
+        .prepare(
+          `INSERT INTO audit_log (patient_id, at, kind, med_id, dose_id, actor, detail_json)
+           SELECT ?1,?2,?3,?4,?5,?6,?7 WHERE ${won.replace('?ws', '?8')}`,
+        )
         .bind(
           state.patient.id, now, `dose_${status}`, med.id, doseId,
           byChat === null ? 'system' : String(byChat),
           JSON.stringify({ takenAt, plannedDueAt: dose.plannedDueAt, src, step: dose.step }),
+          src,
         ),
     );
     return out;

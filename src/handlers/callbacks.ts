@@ -359,7 +359,7 @@ export async function handleCallback(
   }
 
   // --- the "taken earlier" menu -------------------------------------------
-  if (cb.a === 'earlier' && q.message !== undefined) {
+  if (cb.a === 'earlierMenu' && q.message !== undefined) {
     const dose = await db.getDose(cb.doseId);
     if (dose === null) {
       await ack('That reminder has moved on.');
@@ -367,15 +367,12 @@ export async function handleCallback(
     }
     const patient = await db.getPatient(dose.patientId);
     const z = zoneFor(patient?.tz ?? 'UTC');
-    // The first tap opens the menu; the choices inside it carry a real offset.
-    if (cb.minutesAgo === 30 && q.data?.endsWith('.u') !== true) {
-      const menu = renderEarlierMenu(cb.doseId, z, now);
-      await ack();
-      await tg.editMessageText(chatId, q.message.message_id, menu.text, {
-        replyMarkup: { inline_keyboard: menu.buttons },
-      });
-      return;
-    }
+    const menu = renderEarlierMenu(cb.doseId, z, now);
+    await ack();
+    await tg.editMessageText(chatId, q.message.message_id, menu.text, {
+      replyMarkup: { inline_keyboard: menu.buttons },
+    });
+    return;
   }
 
   // --- dose resolution (the contended path) --------------------------------

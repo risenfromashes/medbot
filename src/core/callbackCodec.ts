@@ -10,6 +10,8 @@ export type Callback =
   | { a: 'take'; doseId: number }
   | { a: 'skip'; doseId: number }
   | { a: 'snooze'; doseId: number; minutes: number }
+  /** Open the "when did you take it?" menu. Distinct from a choice made inside it. */
+  | { a: 'earlierMenu'; doseId: number }
   /** "I took it N minutes ago" -- the one-tap form of a retrospective correction. */
   | { a: 'earlier'; doseId: number; minutesAgo: number }
   | { a: 'takeAll'; promptId: number }
@@ -55,6 +57,7 @@ export function encodeCallback(cb: Callback): string {
     case 'take': return `t.${b36(cb.doseId)}`;
     case 'skip': return `s.${b36(cb.doseId)}`;
     case 'snooze': return `z.${b36(cb.doseId)}.${b36(cb.minutes)}`;
+    case 'earlierMenu': return `Y.${b36(cb.doseId)}`;
     case 'earlier': return `e.${b36(cb.doseId)}.${b36(cb.minutesAgo)}`;
     case 'takeAll': return `A.${b36(cb.promptId)}`;
     case 'wake': return 'w';
@@ -94,6 +97,7 @@ export function decodeCallback(data: string): Callback {
     case 't': return valid(n(1)) ? { a: 'take', doseId: n(1) } : { a: 'noop' };
     case 's': return valid(n(1)) ? { a: 'skip', doseId: n(1) } : { a: 'noop' };
     case 'z': return valid(n(1)) ? { a: 'snooze', doseId: n(1), minutes: valid(n(2)) ? n(2) : 15 } : { a: 'noop' };
+    case 'Y': return valid(n(1)) ? { a: 'earlierMenu', doseId: n(1) } : { a: 'noop' };
     case 'e': return valid(n(1)) ? { a: 'earlier', doseId: n(1), minutesAgo: valid(n(2)) ? n(2) : 15 } : { a: 'noop' };
     case 'A': return valid(n(1)) ? { a: 'takeAll', promptId: n(1) } : { a: 'noop' };
     case 'w': return { a: 'wake' };
