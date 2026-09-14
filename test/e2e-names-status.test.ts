@@ -130,6 +130,72 @@ describe('how much is left', () => {
   });
 });
 
+describe('the two halves of /status agree with each other', () => {
+  const FULL = {
+    version: 1, timezone: 'Asia/Dhaka',
+    day: { morning_poll_at: '06:30', presumed_wake_at: '09:00', evening_poll_at: '22:30', presumed_sleep_at: '01:00' },
+    meals: [{ id: 'breakfast', typical_local: '08:30' }, { id: 'lunch', typical_local: '13:30' }, { id: 'dinner', typical_local: '20:30' }],
+    groups: [{ id: 'drops', spacing: '10m' }],
+    medicines: [
+      { id: 'vigalon', name: 'Vigalon', schedule: { type: 'times_per_day', n: 4 }, group: 'drops', group_seq: 1, course: { days: 14 } },
+      { id: 'aqua', name: 'Aquafresh', schedule: { type: 'interval', every: '2h', anchor: 'wake' }, group: 'drops', group_seq: 2 },
+      { id: 'ceevit', name: 'Ceevit', pattern: '1+1+1+1', course: { days: 7 } },
+      { id: 'maxpro', name: 'Maxpro', pattern: '1+0+1', relation: 'before', course: { days: 3 } },
+    ],
+  };
+
+  /** Live through a day answering everything, then read /status back. */
+  async function eveningStatus(): Promise<string> {
+    await enrol('Ifti');
+    await bot.sendFile(PATIENT, 'p.json', JSON.stringify(FULL));
+    await bot.tap(PATIENT, /Apply|Confirm|Yes/i);
+    await bot.send(PATIENT, '/awake');
+    const { encodeCallback } = await import('../src/core/callbackCodec.js');
+    while (bot.now < at('21:55')) {
+      await bot.tick();
+      for (const r of bot.d1.rows("SELECT id FROM doses WHERE status IN ('due','prompted')")) {
+        await bot.sendCallback(PATIENT, encodeCallback({ a: 'take', doseId: Number(r['id']) }));
+      }
+      bot.now += 5 * MINUTE;
+    }
+    return statusText();
+  }
+
+  it('never claims a dose today that the schedule has put off until tomorrow', async () => {
+    // The exact report: "Tab. Ceevit 250 — 6:30am" listed under Coming up, and
+    // "Tab. Ceevit 250 — 1 today" underneath it. One of those has to be wrong.
+    const text = await eveningStatus();
+    const endsAt = at('01:00', 1);
+
+    for (const med of bot.d1.rows("SELECT id, name FROM medications WHERE status='active'")) {
+      const name = String(med['name']);
+      const claimed = new RegExp(`• ${name} — (\\d+) today`).exec(text);
+      if (claimed === null) continue;
+
+      const live = bot.d1.rows(
+        `SELECT effective_due_at FROM doses WHERE med_id = ${Number(med['id'])}
+           AND status IN ('scheduled','deferred','due','prompted')`,
+      );
+      const nextAt = live.length > 0 ? Number(live[0]!['effective_due_at']) : null;
+      const somethingToday = nextAt !== null && nextAt < endsAt;
+
+      if (!somethingToday) {
+        expect(Number(claimed[1]), `${name} says ${claimed[1]} left today, but nothing is due before bed`).toBe(0);
+      } else {
+        expect(Number(claimed[1]), `${name} has a dose due today but claims none left`).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('adds up to the total it prints', async () => {
+    const text = await eveningStatus();
+    const total = Number(/(\d+) left today/.exec(text)?.[1] ?? -1);
+    const parts = [...text.matchAll(/— (\d+) today/g)].map((m) => Number(m[1]));
+    expect(parts.length).toBeGreaterThan(0);
+    expect(parts.reduce((a, b) => a + b, 0), 'the per-medicine lines do not sum to the total').toBe(total);
+  });
+});
+
 describe('the meals line', () => {
   const MEALY = {
     version: 1, timezone: 'Asia/Dhaka',

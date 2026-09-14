@@ -60,9 +60,58 @@ export interface Remaining {
 }
 
 /**
+ * How many more doses actually fit between the next one and bedtime.
+ *
+ * Not `perDay - doneToday`. That is an average over a notional day, and it disagreed with
+ * the schedule sitting right above it: a four-times-daily tablet whose next dose was
+ * half past six tomorrow morning still claimed "1 left today". A number that contradicts
+ * the list next to it is worse than no number, because it makes the reader distrust both.
+ */
+function fitsBeforeBed(
+  med: Medicine,
+  nextDueAt: number | null,
+  dayEndsAt: number,
+  now: number,
+  z: Zone,
+  today: LocalDay,
+  mealsLeft: number,
+): number {
+  // No live dose for a moment -- between one being answered and the planner building its
+  // successor. Estimate where that successor lands rather than dropping the medicine.
+  const next = nextDueAt ?? Math.max(now, (med.lastTakenAt ?? now) + (med.intervalMs ?? 0));
+  if (next >= dayEndsAt) return 0;
+
+  switch (med.kind) {
+    case 'interval': {
+      const interval = med.intervalMs ?? 0;
+      if (interval <= 0) return 1;
+      return 1 + Math.floor((dayEndsAt - next) / interval);
+    }
+    case 'fixed_times': {
+      const times = med.spec.times ?? [];
+      let n = 0;
+      for (const day of [today, z.addLocalDays(today, 1)]) {
+        for (const t of times) {
+          const at = z.wallOnDayUtc(day, t);
+          if (at >= next && at < dayEndsAt) n++;
+        }
+      }
+      return n;
+    }
+    case 'meal':
+      // The live dose is before bedtime, so there is at least this one, plus whatever
+      // meals are still to come after it.
+      return Math.max(mealsLeft, 1);
+    case 'as_needed':
+      return 0;
+  }
+}
+
+/**
  * What is left of this medicine, today and altogether.
  *
  * `doneToday` is taken plus missed: a dose that was missed is not still to come.
+ * `nextDueAt` is the live dose's time, so "left today" agrees with what /status lists.
  */
 export function remainingFor(
   med: Medicine,
@@ -71,11 +120,15 @@ export function remainingFor(
   now: number,
   z: Zone,
   today: LocalDay,
+  day: { nextDueAt: number | null; endsAt: number; mealsLeft: number },
 ): Remaining {
   const perDay = dosesPerDay(med, patient);
   if (med.status !== 'active' || perDay === 0) return { today: 0, course: 0, perDay };
 
-  const todayLeft = Math.max(perDay - doneToday, 0);
+  // The schedule is the truth here, not the per-day average: subtracting what has already
+  // been taken from an estimate is how a medicine with a dose due at ten to one came to
+  // report "0 today". `perDay` is only a sanity ceiling.
+  const todayLeft = Math.max(Math.min(fitsBeforeBed(med, day.nextDueAt, day.endsAt, now, z, today, day.mealsLeft), perDay), 0);
 
   switch (med.courseKind) {
     case 'doses': {

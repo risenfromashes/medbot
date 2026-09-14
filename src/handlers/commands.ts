@@ -1096,10 +1096,21 @@ async function statusFor(ctx: CmdCtx, view: { patient: Patient; z: Zone; isSelf:
 
   const pending: string[] = [];
   const upcoming: Array<{ at: number; text: string }> = [];
+  const liveByMed = new Map<number, number | null>();
 
   for (const med of meds) {
     const live = await ctx.db.liveDoseFor(med.id);
-    if (live === null) continue;
+    if (live === null) {
+      // Between a dose being answered and the planner building its successor, a medicine
+      // has nothing live. Dropping it from the list here made it look as though it had
+      // finished for the day while the count below still said otherwise.
+      liveByMed.set(med.id, null);
+      if (med.status === 'active' && med.kind !== 'as_needed') {
+        upcoming.push({ at: Number.MAX_SAFE_INTEGER - 1, text: `• ${esc(med.name)} — <i>working out the next one</i>` });
+      }
+      continue;
+    }
+    liveByMed.set(med.id, live.effectiveDueAt);
     const step = med.steps[live.step];
     const label = med.steps.length > 1
       ? `${step?.name ?? med.name} (${live.step + 1}/${med.steps.length})`
@@ -1140,13 +1151,26 @@ async function statusFor(ctx: CmdCtx, view: { patient: Patient; z: Zone; isSelf:
 
   // How much of the course is still ahead. The question anyone three days into a week of
   // eye drops actually has, and the one /status could not answer.
+  // The day ends when the patient is expected to be asleep. Anything the schedule puts
+  // past that belongs to tomorrow, and saying otherwise contradicts the list above.
+  const endsAt = z.nextWallAtOrAfter(patient.presumedSleepAt, ctx.now);
+  const mealEvents = await ctx.db.mealEventsFor(patient.id, today);
+  const mealsLeft = (await ctx.db.mealDefsFor(patient.id)).filter((d) => {
+    const e = mealEvents.find((x) => x.meal === d.meal);
+    return e === undefined || e.source === 'planned';
+  }).length;
+
   let leftToday = 0;
   let leftCourse = 0;
   let openEnded = false;
   const perMed: string[] = [];
   for (const med of meds) {
     if (med.status !== 'active') continue;
-    const r = remainingFor(med, patient, doneByMed.get(med.id) ?? 0, ctx.now, z, today);
+    const r = remainingFor(med, patient, doneByMed.get(med.id) ?? 0, ctx.now, z, today, {
+      nextDueAt: liveByMed.get(med.id) ?? null,
+      endsAt,
+      mealsLeft,
+    });
     if (r.perDay === 0) continue;
     leftToday += r.today;
     if (r.course === null) openEnded = true;
