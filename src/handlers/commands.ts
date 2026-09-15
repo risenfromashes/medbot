@@ -879,7 +879,7 @@ async function cmdEating(ctx: CmdCtx, args: string): Promise<void> {
     return;
   }
 
-  await ctx.db.recordMeal(patient.id, meal, mealDayOf(z, patient.lastWakeAt, ctx.now), plannedAt, 'planned', plannedAt, ctx.chatId);
+  await ctx.db.recordMeal(patient.id, meal, mealDayOf(z, patient, plannedAt), plannedAt, 'planned', plannedAt, ctx.chatId);
   await ctx.db.wakeNow(patient.id, ctx.now);
   for (const q of await ctx.db.openPromptsFor(patient.id)) {
     if (q.kind === 'meal' && q.body.meal === meal) {
@@ -907,7 +907,7 @@ async function cmdAte(ctx: CmdCtx, args: string): Promise<void> {
     return;
   }
   const at = time?.at ?? ctx.now;
-  await ctx.db.recordMeal(patient.id, meal, mealDayOf(z, patient.lastWakeAt, ctx.now), at, 'confirmed', null, ctx.chatId);
+  await ctx.db.recordMeal(patient.id, meal, mealDayOf(z, patient, at), at, 'confirmed', null, ctx.chatId);
   await ctx.db.wakeNow(patient.id, ctx.now);
   for (const q of await ctx.db.openPromptsFor(patient.id)) {
     if (q.kind === 'meal' && q.body.meal === meal) {
@@ -1149,6 +1149,10 @@ async function statusFor(ctx: CmdCtx, view: { patient: Patient; z: Zone; isSelf:
   const { patient, z } = view;
   const meds = await ctx.db.medsFor(patient.id);
   const today = z.localDay(ctx.now);
+  // Meals are read by the waking day, exactly as the planner and every write path do.
+  // Leaving this one on the calendar day meant a dinner confirmed after midnight
+  // disappeared from the very command that had just been asked about it.
+  const mealDay = mealDayOf(z, patient, ctx.now);
 
   const lines: string[] = [
     `<b>${esc(patient.displayName)}</b>${view.isSelf ? '' : ' <i>(you back them up)</i>'} · ${z.fmtTime12(ctx.now)}`,
@@ -1194,6 +1198,13 @@ async function statusFor(ctx: CmdCtx, view: { patient: Patient; z: Zone; isSelf:
       pending.push(`• <b>${esc(label)}</b>${withDose}\n  <i>due ${z.fmtTime12(live.effectiveDueAt)}, ${fmtDuration(ctx.now - live.effectiveDueAt)} ago</i>`);
     } else if (live.status === 'deferred') {
       upcoming.push({ at: Number.MAX_SAFE_INTEGER, text: `• ${esc(label)} — <i>waiting until you're up</i>` });
+    } else if (live.effectiveDueAt <= ctx.now) {
+      // Scheduled, its time gone, and still not due: it is waiting on a meal. Saying
+      // "in 45m" about a time forty-five minutes ago is worse than saying nothing.
+      upcoming.push({
+        at: live.effectiveDueAt,
+        text: `• ${esc(label)} — <i>waiting until you've eaten</i>`,
+      });
     } else {
       upcoming.push({
         at: live.effectiveDueAt,
@@ -1226,7 +1237,7 @@ async function statusFor(ctx: CmdCtx, view: { patient: Patient; z: Zone; isSelf:
   // The day ends when the patient is expected to be asleep. Anything the schedule puts
   // past that belongs to tomorrow, and saying otherwise contradicts the list above.
   const endsAt = z.nextWallAtOrAfter(patient.presumedSleepAt, ctx.now);
-  const mealEvents = await ctx.db.mealEventsFor(patient.id, today);
+  const mealEvents = await ctx.db.mealEventsFor(patient.id, mealDay);
   const mealsLeft = (await ctx.db.mealDefsFor(patient.id)).filter((d) => {
     const e = mealEvents.find((x) => x.meal === d.meal);
     return e === undefined || e.source === 'planned';
@@ -1265,7 +1276,7 @@ async function statusFor(ctx: CmdCtx, view: { patient: Patient; z: Zone; isSelf:
   const mealDeps = meds.filter((m) => m.kind === 'meal');
   if (mealDeps.length > 0) {
     const defs = [...(await ctx.db.mealDefsFor(patient.id))].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
-    const events = await ctx.db.mealEventsFor(patient.id, today);
+    const events = await ctx.db.mealEventsFor(patient.id, mealDay);
     const offsets = wakeOffsets(defs);
     const anchor = patient.lastWakeAt ?? patient.wakeStateSince;
 

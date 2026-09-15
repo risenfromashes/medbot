@@ -21,6 +21,7 @@
 
 import type { Action, MealDef, PatientState } from './domain.js';
 import type { LocalDay, Zone } from './tz.js';
+import { mealRefs } from './planSchedule.js';
 import { HOUR, MINUTE, tryParseWall } from './tz.js';
 
 export interface MealFacts {
@@ -115,7 +116,7 @@ function leadFor(state: PatientState, meal: string): number {
   let lead = MIN_LEAD;
   for (const med of state.meds) {
     if (med.status !== 'active') continue;
-    const refs = med.spec.meals ?? (med.spec.meal === undefined ? [] : [med.spec.meal]);
+    const refs = mealRefs(med);
     for (const ref of refs) {
       if (ref.meal === meal && ref.relation === 'before') {
         // Ten minutes of slack on top, so the tablet is not due the instant we ask.

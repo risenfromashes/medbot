@@ -391,9 +391,22 @@ export function zoneFor(requested: string): Zone {
  * starts the next: someone still up at half past midnight has not earned a fresh
  * breakfast, lunch and dinner, and someone who wakes at eleven has not already had them.
  * Readers and writers must agree on this or a confirmed dinner becomes invisible to the
- * tick that asked for it -- and then reappears the next morning as a meal already eaten,
+ * tick that asked for it -- and then reappears next morning as a meal already eaten,
  * silencing the question and stranding every tablet that hangs off it.
+ *
+ * Two guards, both learned the hard way. It only applies while the patient is *awake*:
+ * waking is never presumed from the clock, so someone who stops answering would otherwise
+ * pin the meal day to the last morning they tapped, for ever. And `at` wins when it falls
+ * outside that day, so `/ate dinner 10pm` sent the next morning is filed against the
+ * evening it happened rather than today.
  */
-export function mealDayOf(z: Zone, lastWakeAt: number | null, now: number): LocalDay {
-  return z.localDay(lastWakeAt === null ? now : Math.min(lastWakeAt, now));
+export function mealDayOf(
+  z: Zone,
+  patient: { lastWakeAt: number | null; wakeState: 'awake' | 'asleep' },
+  at: number,
+): LocalDay {
+  const woke = patient.lastWakeAt;
+  if (patient.wakeState !== 'awake' || woke === null) return z.localDay(at);
+  if (at < woke || at - woke >= DAY_MS) return z.localDay(at);
+  return z.localDay(woke);
 }

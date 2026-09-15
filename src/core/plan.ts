@@ -16,7 +16,8 @@ import { planMeals } from './planMeals.js';
 import { planWake } from './planWake.js';
 import { planReports } from './planReport.js';
 import {
-  activePhase, clampToBedtime, courseComplete, effectiveMed, nextDue, reviveAtWake, rollForwardAfter,
+  activePhase, clampToBedtime, courseComplete, effectiveMed, mealDoseAt, mealRefs, nextDue,
+  reviveAtWake, rollForwardAfter,
 } from './planSchedule.js';
 import { applySpacing } from './planGroups.js';
 import { sanitizeMedicine, sanitizePatient, saneNagSteps } from './sanitize.js';
@@ -102,7 +103,7 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
     state,
     now,
     z,
-    mealDayOf(z, wake.state === 'awake' ? wake.wakeAnchor : p.lastWakeAt, now),
+    mealDayOf(z, { lastWakeAt: wake.wakeAnchor, wakeState: wake.state }, now),
     wake.state === 'awake',
     emitWatching,
     (meal, stage) => openPrompts.some((q) => q.kind === 'meal' && q.body.meal === meal && q.body.stage === stage),
@@ -292,7 +293,7 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
     // A meal that is not happening cannot be waited on. Resolve whatever depended on it
     // rather than leaving a dose hanging for the rest of the day.
     if (med.kind === 'meal' && live.takenAt === null) {
-      const refs = med.spec.meals ?? (med.spec.meal === undefined ? [] : [med.spec.meal]);
+      const refs = mealRefs(med);
       const anchors = refs.filter((r) => !(facts.skipped?.has(r.meal) ?? false));
       if (refs.length > 0 && anchors.length === 0) {
         emit({
@@ -475,28 +476,37 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
 
     // "After food" waits for there to have been food.
     //
-    // The dose is still scheduled against the predicted meal -- the medicine is never
-    // left with nothing -- but it does not come due until the meal has actually happened.
-    // Asking for an after-breakfast tablet at twenty past nine, from a patient who did
-    // not get up until eleven, is simply the wrong instruction. The wait is bounded: an
-    // unanswered meal is presumed two hours past its assumed time, which releases it.
-    const waitingOnFood =
-      med.kind === 'meal' &&
-      (() => {
-        const refs = med.spec.meals ?? (med.spec.meal === undefined ? [] : [med.spec.meal]);
-        const after = refs.filter((r) => r.relation !== 'before');
-        if (after.length === 0) return false;
-        return !after.some((r) => {
-          const m = facts.meals.get(r.meal);
-          return m !== undefined && m.confirmed && m.at + r.offsetMs <= now;
-        });
-      })();
+    // The dose is still scheduled against the predicted meal -- the medicine is never left
+    // with nothing -- but it does not come due until that meal has actually happened.
+    // Asking for an after-breakfast tablet at twenty past nine, from a patient who did not
+    // get up until eleven, is simply the wrong instruction.
+    //
+    // Judged against the meal THIS dose is anchored to, not against any meal of the
+    // medicine: a tablet taken after breakfast and after dinner had its evening dose
+    // released by the morning's confirmation, and went out four times before dinner.
+    // Critical medicines are exempt, as they are from every other gate, because the
+    // presumption that bounds the wait only runs while the patient is awake.
+    const heldForMeal =
+      med.kind === 'meal' && !med.critical
+        ? mealRefs(med).find((r) => {
+            if (r.relation === 'before') return false;
+            const m = facts.meals.get(r.meal);
+            if (m === undefined) return false;
+            // The ref this dose sits on: the one whose arithmetic lands where it does.
+            if (Math.abs(mealDoseAt(r, m.at) - live.effectiveDueAt) > MINUTE) return false;
+            return !m.confirmed;
+          }) !== undefined
+        : false;
 
-    if (live.status === 'scheduled' && live.effectiveDueAt <= now && !waitingOnFood) {
+    if (live.status === 'scheduled' && live.effectiveDueAt <= now && !heldForMeal) {
       emit({ t: 'setDoseStatus', doseId: live.id, status: 'due' });
       live = { ...live, status: 'due' };
     }
-    if (waitingOnFood) push(now + 15 * MINUTE);
+    // Only worth looking again soon when the hold is the only thing in the way; a dose
+    // still hours off needs no fifteen-minute heartbeat of its own.
+    if (heldForMeal && live.status === 'scheduled' && live.effectiveDueAt <= now) {
+      push(now + 15 * MINUTE);
+    }
 
     if (live.status === 'due' && live.promptId === null) {
       // Awake, or the medicine says the night is no obstacle. A dose marked not

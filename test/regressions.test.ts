@@ -204,8 +204,7 @@ describe('meals belong to the waking day, and "after food" waits for food', () =
     expect(written['local_day'], 'dinner was filed under the next day').toBe('2026-09-14');
 
     // Now sleep, and get up on the 15th: the meals start again from nothing.
-    await bot.send(PATIENT, '/sleep');
-    await bot.tap(PATIENT, /Leave them|I took them/i).catch(() => undefined);
+    await bot.send(PATIENT, '/sleep'); // nothing outstanding, so no bedtime choices to make
     bot.now = at('11:04', 1);
     await bot.send(PATIENT, '/awake');
     await bot.run(20 * MINUTE, 5 * MINUTE);
@@ -251,9 +250,72 @@ describe('meals belong to the waking day, and "after food" waits for food', () =
     await setUp(MEALY);
     await bot.run(3 * HOUR, 10 * MINUTE);
     const live = bot.d1.one("SELECT effective_due_at FROM doses WHERE status IN ('scheduled','due','prompted')");
-    if (live !== null) {
-      expect(Number(live['effective_due_at']), 'the dose was quietly moved to tomorrow')
-        .toBeLessThan(at('00:00', 1));
+    expect(live, 'the medicine lost its dose entirely').not.toBeNull();
+    expect(Number(live!['effective_due_at']), 'the dose was quietly moved to tomorrow')
+      .toBeLessThan(at('00:00', 1));
+  });
+});
+
+describe('the food gate, judged per meal', () => {
+  const TWICE = {
+    version: 1, timezone: 'Asia/Dhaka',
+    day: { morning_poll_at: '06:30', presumed_wake_at: '09:00', evening_poll_at: '22:30', presumed_sleep_at: '02:00' },
+    meals: [{ id: 'breakfast', typical_local: '08:30' }, { id: 'dinner', typical_local: '20:30' }],
+    medicines: [{
+      id: 'flexi', name: 'Flexi', dose: '1 tablet',
+      schedule: { type: 'meal', meals: ['breakfast', 'dinner'], relation: 'after' }, course: { days: 7 },
+    }],
+  };
+
+  it('does not let breakfast release the evening dose', async () => {
+    // The gate asked "has ANY of this medicine's meals happened?", so the morning's
+    // confirmation released the dinner dose and it went out before dinner.
+    await setUp(TWICE);
+    await bot.run(60 * MINUTE, 5 * MINUTE);
+    await bot.send(PATIENT, '/ate breakfast');
+    await bot.run(15 * MINUTE, 5 * MINUTE);
+    for (const r of bot.d1.rows("SELECT id FROM doses WHERE status IN ('due','prompted')")) {
+      await bot.sendCallback(PATIENT, encodeCallback({ a: 'take', doseId: Number(r['id']) }));
     }
+    bot.now = at('20:30');
+    bot.clear();
+    await bot.run(90 * MINUTE, 10 * MINUTE);
+    expect(
+      bot.textsTo(PATIENT).some((t) => /Time for <b>Flexi/.test(t)),
+      'asked for the after-dinner tablet before dinner, on the strength of breakfast',
+    ).toBe(false);
+  });
+
+  it('says a held dose is waiting on food, not that it is due in 45 minutes', async () => {
+    await setUp(TWICE);
+    await bot.run(90 * MINUTE, 5 * MINUTE);
+    bot.clear();
+    await bot.send(PATIENT, '/status');
+    const text = bot.textsTo(PATIENT).join('\n');
+    expect(text).toMatch(/waiting until you.{0,3}ve eaten/i);
+    expect(text, 'a time that has passed was rendered as one still to come').not.toMatch(/Flexi — \d+:\d+\w+ <i>\(in /);
+  });
+
+  it('files a retrospective meal under the evening it happened', async () => {
+    await setUp(TWICE);
+    bot.now = at('08:00', 1);
+    await bot.send(PATIENT, '/awake');
+    await bot.send(PATIENT, '/ate dinner 10pm');
+    const row = bot.d1.one("SELECT local_day FROM meal_events WHERE meal='dinner'")!;
+    expect(row['local_day'], 'last night’s dinner was filed under today').toBe('2026-09-14');
+  });
+
+  it('files a meal recorded before the patient says they are up under today', async () => {
+    // The day must not come from a last_wake_at left over from yesterday, or the
+    // ON CONFLICT overwrites yesterday's row and loses it.
+    await setUp(TWICE);
+    await bot.send(PATIENT, '/ate breakfast');
+    bot.now = at('22:00');
+    await bot.send(PATIENT, '/sleep');
+    bot.now = at('09:00', 1);
+    await bot.send(PATIENT, '/ate breakfast'); // before tapping "I'm awake"
+    const rows = bot.d1.rows("SELECT local_day FROM meal_events WHERE meal='breakfast' ORDER BY local_day");
+    expect(rows.map((r) => r['local_day']), 'yesterday’s breakfast was overwritten')
+      .toEqual(['2026-09-14', '2026-09-15']);
   });
 });

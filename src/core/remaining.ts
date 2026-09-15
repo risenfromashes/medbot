@@ -12,6 +12,7 @@
 
 import type { Medicine, Patient } from './domain.js';
 import type { LocalDay, Zone } from './tz.js';
+import { mealRefs } from './planSchedule.js';
 import { DAY_MS, HOUR, MINUTE, tryParseWall } from './tz.js';
 
 /**
@@ -54,7 +55,7 @@ export function dosesPerDay(med: Medicine, patient: Patient): number {
     case 'fixed_times':
       return Math.max(med.spec.times?.length ?? 1, 1);
     case 'meal': {
-      const refs = med.spec.meals ?? (med.spec.meal === undefined ? [] : [med.spec.meal]);
+      const refs = mealRefs(med);
       return Math.max(refs.length, 1);
     }
     case 'as_needed':

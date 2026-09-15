@@ -10,7 +10,7 @@
  * cycle starts; `stepSpacingMs` governs the gaps inside it.
  */
 
-import type { Medicine, PatientState, Phase } from './domain.js';
+import type { MealRef, Medicine, PatientState, Phase } from './domain.js';
 import type { LocalDay, Zone } from './tz.js';
 import { DAY_MS, HOUR, MINUTE } from './tz.js';
 
@@ -49,6 +49,25 @@ export interface DueResult {
   skipped: number;
   /** Set when the medicine cannot be scheduled yet, e.g. an after-meal dose pre-meal. */
   blocked?: 'awaiting_meal';
+}
+
+/**
+ * The meals a medicine hangs off, however the prescription spelled it.
+ *
+ * The single-or-plural shape had six copies across the codebase, and the arithmetic below
+ * had two that had already drifted apart on `with`. Both live here now.
+ */
+export function mealRefs(med: Pick<Medicine, 'spec'>): MealRef[] {
+  return med.spec.meals ?? (med.spec.meal === undefined ? [] : [med.spec.meal]);
+}
+
+/** When a dose anchored on this ref falls, given when the meal is. */
+export function mealDoseAt(ref: MealRef, mealAt: number): number {
+  switch (ref.relation) {
+    case 'before': return mealAt - ref.offsetMs;
+    case 'with': return mealAt;
+    case 'after': return mealAt + ref.offsetMs;
+  }
 }
 
 /**
@@ -155,7 +174,7 @@ function rawCycleStart(
     }
 
     case 'meal': {
-      const refs = med.spec.meals ?? (med.spec.meal === undefined ? [] : [med.spec.meal]);
+      const refs = mealRefs(med);
       if (refs.length === 0) return null;
 
       // Anchor on whichever meal comes next after the last dose. With several meals a day
@@ -167,35 +186,21 @@ function rawCycleStart(
       );
 
       let best: number | null = null;
-      let anyPending = false;
 
       for (const ref of refs) {
         const m = facts.meals.get(ref.meal);
         if (m === undefined) continue;
 
-        // A *before*-meal dose fires against the believed time -- stated if the patient
-        // has said, predicted otherwise -- because by the time a meal is confirmed the
-        // before-window has already gone.
-        //
-        // An *after*-meal dose waits for the meal to have actually happened. "Take after
-        // food" asked before there has been any food is simply wrong, and it is what had
-        // an after-breakfast tablet sitting overdue at twenty past nine for a patient who
-        // did not get up until eleven. The wait is safe because it is bounded: an
-        // unanswered meal is presumed to have happened two hours past its assumed time,
-        // which releases the dose without anybody doing anything.
-        if (ref.relation !== 'before' && !m.confirmed) anyPending = true;
-
-        const at = ref.relation === 'before'
-          ? m.at - ref.offsetMs
-          : ref.relation === 'with'
-            ? m.at
-            : m.at + ref.offsetMs;
-
+        // Every relation is *scheduled* against the believed meal time -- stated if the
+        // patient has said, predicted otherwise. Whether an after-meal dose may be asked
+        // for before the meal has happened is a separate question, settled in `plan.ts`
+        // where the dose becomes due; scheduling it here is what keeps the medicine from
+        // having nothing at all.
+        const at = mealDoseAt(ref, m.at);
         if (at > cursor && (best === null || at < best)) best = at;
       }
 
       if (best !== null) return { at: best, anchor: 'meal' };
-      void anyPending;
 
       // Every meal today is already behind us. A tablet taken with breakfast and dinner
       // still has a dose tomorrow, and leaving it with nothing scheduled would be exactly
@@ -207,8 +212,7 @@ function rawCycleStart(
         for (const ref of refs) {
           const m = facts.meals.get(ref.meal);
           if (m === undefined) continue;
-          const shift = ref.relation === 'before' ? -ref.offsetMs : ref.relation === 'after' ? ref.offsetMs : 0;
-          const at = m.at + DAY_MS + shift;
+          const at = mealDoseAt(ref, m.at + DAY_MS);
           if (earliest === null || at < earliest) earliest = at;
         }
         if (earliest !== null) return { at: earliest, anchor: 'meal' };

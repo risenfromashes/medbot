@@ -43,7 +43,7 @@ export async function runTick(env: Env, now: number): Promise<{ patients: number
       // The waking day, for meals. It only differs from the calendar one for a patient
       // who is still up after midnight -- and for them, the difference is the whole point:
       // their breakfast, lunch and dinner are already behind them.
-      const state = await db.loadState(pid, today, mealDayOf(z, patient.lastWakeAt, now));
+      const state = await db.loadState(pid, today, mealDayOf(z, patient, now));
       if (state === null) continue;
 
       const actions = plan(state, now, z);
