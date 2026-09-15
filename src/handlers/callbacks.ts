@@ -10,7 +10,7 @@
 
 import { decodeCallback } from '../core/callbackCodec.js';
 import { renderConfirmation, renderEarlierMenu, renderWokeEarlierMenu } from '../core/render.js';
-import { HOUR, MINUTE, fmtDuration, zoneFor } from '../core/tz.js';
+import { HOUR, MINUTE, fmtDuration, mealDayOf, zoneFor } from '../core/tz.js';
 import { parseDuration } from '../core/timeparse.js';
 import { SPREAD_FROM, SPREAD_TO, dosesPerDayInterval } from '../core/prescription.js';
 import { Db } from '../io/db.js';
@@ -321,7 +321,7 @@ export async function handleCallback(
     // Either "yes, around then" / "push it back" against a proposed time, or a plain
     // "in about an hour".
     const plannedAt = cb.a === 'mealAt' ? cb.at : now + cb.inMinutes * MINUTE;
-    await db.recordMeal(patient.id, cb.meal, z.localDay(now), plannedAt, 'planned', plannedAt, chatId);
+    await db.recordMeal(patient.id, cb.meal, mealDayOf(z, patient.lastWakeAt, now), plannedAt, 'planned', plannedAt, chatId);
     await db.wakeNow(patient.id, now);
     for (const prompt of await db.openPromptsFor(patient.id)) {
       if (prompt.kind === 'meal' && prompt.body.meal === cb.meal) {
@@ -346,7 +346,7 @@ export async function handleCallback(
       return;
     }
     const z = zoneFor(patient.tz);
-    await db.recordMeal(patient.id, cb.meal, z.localDay(now), now, cb.a === 'ate' ? 'confirmed' : 'skipped', null, chatId);
+    await db.recordMeal(patient.id, cb.meal, mealDayOf(z, patient.lastWakeAt, now), now, cb.a === 'ate' ? 'confirmed' : 'skipped', null, chatId);
     await db.wakeNow(patient.id, now);
     for (const prompt of await db.openPromptsFor(patient.id)) {
       if (prompt.kind === 'meal' && prompt.body.meal === cb.meal) {

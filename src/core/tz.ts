@@ -383,3 +383,17 @@ export function zoneFor(requested: string): Zone {
   }
   return z;
 }
+
+/**
+ * Which day's meals a moment belongs to.
+ *
+ * The waking day, not the calendar one. Going to sleep is what ends a day of meals and
+ * starts the next: someone still up at half past midnight has not earned a fresh
+ * breakfast, lunch and dinner, and someone who wakes at eleven has not already had them.
+ * Readers and writers must agree on this or a confirmed dinner becomes invisible to the
+ * tick that asked for it -- and then reappears the next morning as a meal already eaten,
+ * silencing the question and stranding every tablet that hangs off it.
+ */
+export function mealDayOf(z: Zone, lastWakeAt: number | null, now: number): LocalDay {
+  return z.localDay(lastWakeAt === null ? now : Math.min(lastWakeAt, now));
+}

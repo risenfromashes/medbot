@@ -17,7 +17,7 @@ import { parseDuration, parseTime, splitTrailingTime } from '../core/timeparse.j
 import { remainingFor, summarise } from '../core/remaining.js';
 import { looksLikeRealName } from '../core/names.js';
 import { wakeOffsets } from '../core/planMeals.js';
-import { DAY_MS, HOUR, MINUTE, fmtDuration, isValidTimeZone, parseWall, zoneFor } from '../core/tz.js';
+import { DAY_MS, HOUR, MINUTE, fmtDuration, isValidTimeZone, mealDayOf, parseWall, zoneFor } from '../core/tz.js';
 import type { Zone } from '../core/tz.js';
 import { Db } from '../io/db.js';
 import { AdminDb } from '../io/adminDb.js';
@@ -879,7 +879,7 @@ async function cmdEating(ctx: CmdCtx, args: string): Promise<void> {
     return;
   }
 
-  await ctx.db.recordMeal(patient.id, meal, z.localDay(ctx.now), plannedAt, 'planned', plannedAt, ctx.chatId);
+  await ctx.db.recordMeal(patient.id, meal, mealDayOf(z, patient.lastWakeAt, ctx.now), plannedAt, 'planned', plannedAt, ctx.chatId);
   await ctx.db.wakeNow(patient.id, ctx.now);
   for (const q of await ctx.db.openPromptsFor(patient.id)) {
     if (q.kind === 'meal' && q.body.meal === meal) {
@@ -907,7 +907,7 @@ async function cmdAte(ctx: CmdCtx, args: string): Promise<void> {
     return;
   }
   const at = time?.at ?? ctx.now;
-  await ctx.db.recordMeal(patient.id, meal, z.localDay(at), at, 'confirmed', null, ctx.chatId);
+  await ctx.db.recordMeal(patient.id, meal, mealDayOf(z, patient.lastWakeAt, ctx.now), at, 'confirmed', null, ctx.chatId);
   await ctx.db.wakeNow(patient.id, ctx.now);
   for (const q of await ctx.db.openPromptsFor(patient.id)) {
     if (q.kind === 'meal' && q.body.meal === meal) {

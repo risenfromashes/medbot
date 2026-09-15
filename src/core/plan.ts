@@ -23,7 +23,7 @@ import { sanitizeMedicine, sanitizePatient, saneNagSteps } from './sanitize.js';
 import { advanceMedicine } from './advance.js';
 import type { DayFacts } from './planSchedule.js';
 import type { Zone } from './tz.js';
-import { HOUR, MINUTE } from './tz.js';
+import { HOUR, MINUTE, mealDayOf } from './tz.js';
 import { esc } from './html.js';
 
 /**
@@ -102,9 +102,7 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
     state,
     now,
     z,
-    // The waking day again: recording tonight's dinner against tomorrow's date would make
-    // it invisible to the very tick that just asked about it.
-    wake.state === 'awake' ? z.localDay(wake.wakeAnchor) : today,
+    mealDayOf(z, wake.state === 'awake' ? wake.wakeAnchor : p.lastWakeAt, now),
     wake.state === 'awake',
     emitWatching,
     (meal, stage) => openPrompts.some((q) => q.kind === 'meal' && q.body.meal === meal && q.body.stage === stage),
@@ -324,7 +322,16 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
         const drift = Math.abs(desired.effectiveDueAt - live.effectiveDueAt);
         const clearsGap =
           med.lastTakenAt === null || desired.effectiveDueAt > med.lastTakenAt + med.minGapMs;
-        if (drift > MINUTE && clearsGap) {
+        // This block exists to follow a meal whose *time* moved, not to re-choose which
+        // meal the dose belongs to. Once today's meals are an hour behind, the schedule
+        // starts answering with the next one along -- and an unanswered breakfast dose
+        // was quietly becoming the dinner dose, or tomorrow's breakfast, prompt cancelled
+        // and nothing logged. Beyond the roll-forward horizon it is no longer the same
+        // dose: leave it where it is and let it be recorded missed, honestly.
+        const sameMeal =
+          desired.effectiveDueAt <= live.effectiveDueAt ||
+          desired.effectiveDueAt - live.effectiveDueAt <= rollForwardAfter(med);
+        if (drift > MINUTE && clearsGap && sameMeal) {
           emit({
             t: 'retimeDose',
             doseId: live.id,
@@ -466,10 +473,30 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
     const { med } = item;
     let live = item.dose;
 
-    if (live.status === 'scheduled' && live.effectiveDueAt <= now) {
+    // "After food" waits for there to have been food.
+    //
+    // The dose is still scheduled against the predicted meal -- the medicine is never
+    // left with nothing -- but it does not come due until the meal has actually happened.
+    // Asking for an after-breakfast tablet at twenty past nine, from a patient who did
+    // not get up until eleven, is simply the wrong instruction. The wait is bounded: an
+    // unanswered meal is presumed two hours past its assumed time, which releases it.
+    const waitingOnFood =
+      med.kind === 'meal' &&
+      (() => {
+        const refs = med.spec.meals ?? (med.spec.meal === undefined ? [] : [med.spec.meal]);
+        const after = refs.filter((r) => r.relation !== 'before');
+        if (after.length === 0) return false;
+        return !after.some((r) => {
+          const m = facts.meals.get(r.meal);
+          return m !== undefined && m.confirmed && m.at + r.offsetMs <= now;
+        });
+      })();
+
+    if (live.status === 'scheduled' && live.effectiveDueAt <= now && !waitingOnFood) {
       emit({ t: 'setDoseStatus', doseId: live.id, status: 'due' });
       live = { ...live, status: 'due' };
     }
+    if (waitingOnFood) push(now + 15 * MINUTE);
 
     if (live.status === 'due' && live.promptId === null) {
       // Awake, or the medicine says the night is no obstacle. A dose marked not

@@ -181,3 +181,79 @@ describe('the retrospective guards', () => {
     expect(decodeCallback(choice)).toEqual({ a: 'earlier', doseId: 7, minutesAgo: 30 });
   });
 });
+
+describe('meals belong to the waking day, and "after food" waits for food', () => {
+  const MEALY = {
+    version: 1, timezone: 'Asia/Dhaka',
+    day: { morning_poll_at: '06:30', presumed_wake_at: '09:00', evening_poll_at: '22:30', presumed_sleep_at: '02:00' },
+    meals: [{ id: 'breakfast', typical_local: '08:30' }, { id: 'dinner', typical_local: '20:30' }],
+    medicines: [{
+      id: 'flexi', name: 'Flexi', dose: '1 tablet',
+      schedule: { type: 'meal', meals: ['breakfast', 'dinner'], relation: 'after' }, course: { days: 7 },
+    }],
+  };
+
+  it('does not carry last night’s dinner into a new day', async () => {
+    // Confirmed after midnight, so the calendar day had rolled: the meal was written
+    // against tomorrow, and the next morning the bot found dinner already eaten, asked
+    // nothing all day, and had an after-dinner tablet overdue before breakfast.
+    await setUp(MEALY);
+    bot.now = at('00:20', 1); // still up, past midnight
+    await bot.send(PATIENT, '/ate dinner');
+    const written = bot.d1.one("SELECT local_day FROM meal_events WHERE meal='dinner'")!;
+    expect(written['local_day'], 'dinner was filed under the next day').toBe('2026-09-14');
+
+    // Now sleep, and get up on the 15th: the meals start again from nothing.
+    await bot.send(PATIENT, '/sleep');
+    await bot.tap(PATIENT, /Leave them|I took them/i).catch(() => undefined);
+    bot.now = at('11:04', 1);
+    await bot.send(PATIENT, '/awake');
+    await bot.run(20 * MINUTE, 5 * MINUTE);
+    bot.clear();
+    await bot.send(PATIENT, '/status');
+    const status = bot.textsTo(PATIENT).join('\n');
+    expect(status, "showed yesterday's meals as today's").not.toMatch(/✅ dinner/);
+  });
+
+  it('does not ask for an after-food tablet before there has been food', async () => {
+    await setUp(MEALY);
+    await bot.run(90 * MINUTE, 5 * MINUTE);
+    const asked = bot.textsTo(PATIENT).some((t) => /Time for <b>Flexi/.test(t));
+    expect(asked, 'asked for an after-breakfast tablet before breakfast').toBe(false);
+    // The medicine is not lost, though: it still has a dose waiting.
+    expect(bot.d1.rows("SELECT * FROM doses WHERE status IN ('scheduled','due','prompted')").length)
+      .toBeGreaterThan(0);
+  });
+
+  it('releases it the moment the meal is confirmed', async () => {
+    await setUp(MEALY);
+    await bot.run(60 * MINUTE, 5 * MINUTE);
+    await bot.send(PATIENT, '/ate breakfast');
+    await bot.run(15 * MINUTE, 5 * MINUTE);
+    expect(
+      bot.textsTo(PATIENT).some((t) => /Time for <b>Flexi/.test(t)),
+      'the tablet stayed locked away after the meal was confirmed',
+    ).toBe(true);
+  });
+
+  it('releases it anyway if the meal is never answered', async () => {
+    // The wait has to be bounded, or a patient who ignores meal questions never gets the
+    // tablet at all.
+    await setUp(MEALY);
+    await bot.run(5 * HOUR, 10 * MINUTE);
+    expect(
+      bot.textsTo(PATIENT).some((t) => /Time for <b>Flexi/.test(t)),
+      'the tablet was never released, though the meal was presumed hours ago',
+    ).toBe(true);
+  });
+
+  it('never carries an unanswered meal dose off to tomorrow', async () => {
+    await setUp(MEALY);
+    await bot.run(3 * HOUR, 10 * MINUTE);
+    const live = bot.d1.one("SELECT effective_due_at FROM doses WHERE status IN ('scheduled','due','prompted')");
+    if (live !== null) {
+      expect(Number(live['effective_due_at']), 'the dose was quietly moved to tomorrow')
+        .toBeLessThan(at('00:00', 1));
+    }
+  });
+});

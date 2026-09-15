@@ -173,17 +173,19 @@ function rawCycleStart(
         const m = facts.meals.get(ref.meal);
         if (m === undefined) continue;
 
-        // Every relation schedules against the meal time the bot currently believes in --
-        // stated if the patient has said, predicted otherwise. An after-meal dose waiting
-        // for a confirmation that may never come would leave the medicine with nothing
-        // scheduled at all, which is the silence this whole design is built to avoid. If
-        // the patient then says they are eating later, the dose follows: a meal-anchored
-        // dose is retimed whenever its meal moves.
-        if (ref.relation === 'after' && !m.confirmed) anyPending = true;
+        // A *before*-meal dose fires against the believed time -- stated if the patient
+        // has said, predicted otherwise -- because by the time a meal is confirmed the
+        // before-window has already gone.
+        //
+        // An *after*-meal dose waits for the meal to have actually happened. "Take after
+        // food" asked before there has been any food is simply wrong, and it is what had
+        // an after-breakfast tablet sitting overdue at twenty past nine for a patient who
+        // did not get up until eleven. The wait is safe because it is bounded: an
+        // unanswered meal is presumed to have happened two hours past its assumed time,
+        // which releases the dose without anybody doing anything.
+        if (ref.relation !== 'before' && !m.confirmed) anyPending = true;
 
         const at = ref.relation === 'before'
-          // Fires against the stated or predicted time, because by the time a meal is
-          // confirmed the before-window has already gone.
           ? m.at - ref.offsetMs
           : ref.relation === 'with'
             ? m.at

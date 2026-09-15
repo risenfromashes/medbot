@@ -8,7 +8,7 @@
  */
 
 import { plan } from '../core/plan.js';
-import { zoneFor } from '../core/tz.js';
+import { mealDayOf, zoneFor } from '../core/tz.js';
 import { Db } from '../io/db.js';
 import { Telegram } from '../io/telegram.js';
 import { dispatch, clearPromptMessages, flushOutbox } from './dispatch.js';
@@ -43,12 +43,7 @@ export async function runTick(env: Env, now: number): Promise<{ patients: number
       // The waking day, for meals. It only differs from the calendar one for a patient
       // who is still up after midnight -- and for them, the difference is the whole point:
       // their breakfast, lunch and dinner are already behind them.
-      const rowWake = await db.getPatient(pid);
-      const mealDay =
-        rowWake !== null && rowWake.wakeState === 'awake' && rowWake.lastWakeAt !== null
-          ? zoneFor(rowWake.tz).localDay(rowWake.lastWakeAt)
-          : today;
-      const state = await db.loadState(pid, today, mealDay);
+      const state = await db.loadState(pid, today, mealDayOf(z, patient.lastWakeAt, now));
       if (state === null) continue;
 
       const actions = plan(state, now, z);
