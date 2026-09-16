@@ -15,6 +15,7 @@ import type { Rendered } from '../core/render.js';
 import type { Db } from '../io/db.js';
 import type { Telegram } from '../io/telegram.js';
 import type { Zone } from '../core/tz.js';
+import { esc } from '../core/html.js';
 
 export interface DispatchCtx {
   db: Db;
@@ -303,7 +304,6 @@ export async function clearPromptMessages(ctx: DispatchCtx, promptId: number): P
   }
 }
 
-/** A short line to every chat linked to the patient. Used for confirmations. */
 /** Take down any side-note posted about this dose. */
 export async function clearDoseNotes(ctx: DispatchCtx, doseId: number): Promise<void> {
   for (const note of await ctx.db.takeDownNotes(doseId)) {
@@ -312,6 +312,34 @@ export async function clearDoseNotes(ctx: DispatchCtx, doseId: number): Promise<
   }
 }
 
+/**
+ * How a meal is reported to everyone who is not the one who recorded it.
+ *
+ * Meals are the household's shared timeline: the caregiver wants to know breakfast
+ * happened as much as the patient does, and until now nobody was told unless the
+ * caregiver was the one who pressed the button. One wording for all four paths --
+ * `/ate`, `/eating`, and both meal buttons -- so the two chats never see the same
+ * event described two different ways.
+ *
+ * Phrased from the outside ("Ifti -- breakfast at 11:22") rather than the second person,
+ * because the same sentence goes to the patient and to the people backing them up.
+ */
+export function mealNews(
+  patientName: string,
+  meal: string,
+  source: 'confirmed' | 'skipped' | 'planned',
+  at: number,
+  z: Zone,
+  by: string | null,
+): string {
+  const who = by === null ? '' : ` (by ${esc(by)})`;
+  const head = `<b>${esc(patientName)}</b> — ${esc(meal)}`;
+  if (source === 'skipped') return `⏭ ${head} skipped${who}.`;
+  if (source === 'planned') return `🍽 ${head} at about ${z.fmtTime12(at)}${who}.`;
+  return `🍽 ${head} at ${z.fmtTime12(at)}${who}.`;
+}
+
+/** A short line to every chat linked to the patient. Used for confirmations. */
 export async function broadcast(
   ctx: DispatchCtx,
   chats: Chat[],

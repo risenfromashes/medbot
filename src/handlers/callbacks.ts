@@ -15,7 +15,7 @@ import { parseDuration } from '../core/timeparse.js';
 import { SPREAD_FROM, SPREAD_TO, dosesPerDayInterval } from '../core/prescription.js';
 import { Db } from '../io/db.js';
 import { Telegram, esc } from '../io/telegram.js';
-import { broadcast, clearDoseNotes, clearPromptMessages } from './dispatch.js';
+import { broadcast, clearDoseNotes, clearPromptMessages, mealNews } from './dispatch.js';
 import {
   actingFor, applyImport, bedtimeButtons, editMenuFor, forceSleep, goodnightMessage,
   noteSpacedNeighbours, offerMissedSince, resolveBedtime,
@@ -341,6 +341,13 @@ export async function handleCallback(
       `🍽 <b>${esc(cb.meal)}</b> at about ${z.fmtTime12(plannedAt)}.\n` +
         `<i>I'll remind you about anything that needs taking before it.</i>`,
     );
+    const planChats = await db.chatsFor(patient.id);
+    await broadcast(
+      { db, tg, z, now },
+      planChats,
+      mealNews(patient.displayName, cb.meal, 'planned', plannedAt, z, planChats.length > 1 ? userName : null),
+      chatId,
+    );
     return;
   }
 
@@ -361,6 +368,17 @@ export async function handleCallback(
       }
     }
     await ack(cb.a === 'ate' ? 'Noted.' : 'Skipping it.');
+    // The prompt itself has just been deleted, so without this the meal leaves no trace
+    // in any chat -- not even the one that answered it.
+    const mealChats = await db.chatsFor(patient.id);
+    await broadcast(
+      { db, tg, z, now },
+      mealChats,
+      mealNews(
+        patient.displayName, cb.meal, cb.a === 'ate' ? 'confirmed' : 'skipped', now, z,
+        mealChats.length > 1 ? userName : null,
+      ),
+    );
     return;
   }
 

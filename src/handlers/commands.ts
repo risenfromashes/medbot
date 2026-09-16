@@ -23,7 +23,7 @@ import { Db } from '../io/db.js';
 import { AdminDb } from '../io/adminDb.js';
 import { Telegram, esc } from '../io/telegram.js';
 import type { Env, TgIncomingMessage } from '../types.js';
-import { broadcast, clearDoseNotes, clearPromptMessages } from './dispatch.js';
+import { broadcast, clearDoseNotes, clearPromptMessages, mealNews } from './dispatch.js';
 import { encodeCallback } from '../core/callbackCodec.js';
 
 export const COMMANDS = [
@@ -213,8 +213,14 @@ async function acting(ctx: CmdCtx, args = '', verb = 'that'): Promise<Acting | n
  * own chat going quiet about it is not: they would have no way to tell "somebody handled
  * it" from "nothing happened", which is the ambiguity this whole bot exists to remove.
  */
-async function tellTheOthers(ctx: CmdCtx, ap: Acting, text: string): Promise<void> {
-  if (ap.isSelf) return;
+/**
+ * `always` says it even when the patient recorded it themselves. Most confirmations are
+ * only news in the other direction -- the caregiver answered, so tell the patient -- but
+ * a meal and a medicine being stopped are news to the caregiver too, and that was the
+ * half nobody was hearing.
+ */
+async function tellTheOthers(ctx: CmdCtx, ap: Acting, text: string, always = false): Promise<void> {
+  if (ap.isSelf && !always) return;
   const chats = await ctx.db.chatsFor(ap.patient.id);
   await broadcast({ db: ctx.db, tg: ctx.tg, z: ap.z, now: ctx.now }, chats, text, ctx.chatId);
 }
@@ -892,6 +898,7 @@ async function cmdEating(ctx: CmdCtx, args: string): Promise<void> {
     `🍽 <b>${esc(meal)}</b> at about ${z.fmtTime12(plannedAt)}.\n` +
       `<i>I'll remind you about anything that needs taking before it.</i>`,
   );
+  await tellTheOthers(ctx, ap, mealNews(patient.displayName, meal, 'planned', plannedAt, z, ctx.userName), true);
 }
 
 async function cmdAte(ctx: CmdCtx, args: string): Promise<void> {
@@ -916,7 +923,7 @@ async function cmdAte(ctx: CmdCtx, args: string): Promise<void> {
     }
   }
   await reply(ctx, `🍽 Noted — ${esc(meal)} at ${z.fmtTime12(at)}${onBehalf(ap)}.`);
-  await tellTheOthers(ctx, ap, `🍽 ${esc(ctx.userName)} recorded your ${esc(meal)} at ${z.fmtTime12(at)}.`);
+  await tellTheOthers(ctx, ap, mealNews(patient.displayName, meal, 'confirmed', at, z, ctx.userName), true);
 }
 
 // --- doses ---------------------------------------------------------------
@@ -1273,9 +1280,44 @@ async function statusFor(ctx: CmdCtx, view: { patient: Patient; z: Zone; isSelf:
     lines.push('', `<b>Today so far</b> — ${taken} taken${missed > 0 ? `, ${missed} missed` : ''}`);
   }
 
-  // Meals matter only if something actually depends on them.
-  const mealDeps = meds.filter((m) => m.kind === 'meal');
-  if (mealDeps.length > 0) {
+  // A medicine stopped before its course ran out is the one thing /status must not be
+  // silent about. Two of Ifti's were stopped mid-course by a mistyped command and nothing
+  // anywhere said so -- they simply never came up again, which is the exact failure this
+  // whole bot exists to prevent. An indefinite medicine is left out: stopping one is how
+  // it ends, so it is not news.
+  const stoppedEarly = (await ctx.db.medsFor(patient.id, true)).filter((m) => {
+    if (m.status !== 'discontinued' && m.status !== 'paused') return false;
+    switch (m.courseKind) {
+      case 'days':
+        // A course that never got its first dose has `startedAt` null; stopping it is
+        // still stopping it part-way.
+        return m.courseDays !== null
+          && (m.startedAt === null || z.diffLocalDays(z.localDay(m.startedAt), today) < m.courseDays);
+      case 'doses':
+        return m.courseDoses !== null && m.dosesTaken < m.courseDoses;
+      case 'until':
+        return m.courseUntil !== null && m.courseUntil > ctx.now;
+      case 'indefinite':
+        return false;
+    }
+  });
+  if (stoppedEarly.length > 0) {
+    lines.push(
+      '',
+      '<b>Stopped before the course finished</b>',
+      ...stoppedEarly.map(
+        (m) => `• ${esc(m.name)} — ${m.status === 'paused' ? 'paused' : 'stopped'} · ` +
+          `<code>/resume ${esc(m.medKey)}</code>`,
+      ),
+    );
+  }
+
+  // Meals are part of the day whether or not a tablet hangs off one: the bot asks about
+  // them, anchors the schedule on them, and the household reads them to see how the day
+  // is going. Gating this on an active meal-anchored medicine meant that the moment the
+  // last such medicine stopped, breakfast/lunch/dinner vanished from /status with no
+  // explanation -- which is exactly how they disappeared in real use.
+  {
     const defs = [...(await ctx.db.mealDefsFor(patient.id))].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
     const events = await ctx.db.mealEventsFor(patient.id, mealDay);
     const offsets = wakeOffsets(defs);
@@ -1389,10 +1431,29 @@ async function cmdMedStatus(ctx: CmdCtx, args: string, status: Medicine['status'
     return;
   }
   const med = matches[0]!;
-  await ctx.db.setMedStatus(med.id, status, ctx.now);
-  await ctx.db.wakeNow(ap.patient.id, ctx.now);
   const word = status === 'paused' ? 'Paused' : status === 'active' ? 'Resumed' : 'Stopped';
-  await reply(ctx, `${word} <b>${esc(med.name)}</b>.`);
+  if (med.status === status) {
+    await reply(ctx, `<b>${esc(med.name)}</b> is already ${word.toLowerCase()}.`);
+    return;
+  }
+  await ctx.db.setMedStatus(med.id, status, ctx.now);
+  // This is the one edit that makes the bot go silent about a medicine for good, and it
+  // was the one edit that wrote nothing to the log: two of Ifti's medicines stopped
+  // mid-course with no record of who did it or when. Everything else here audits.
+  await ctx.db.audit(
+    ap.patient.id, 'med_status_set', String(ctx.chatId),
+    { medId: med.id, medKey: med.medKey, from: med.status, to: status }, ctx.now,
+  );
+  await ctx.db.wakeNow(ap.patient.id, ctx.now);
+  const undo = status === 'active' ? '' : `\n<i>Undo with</i> <code>/resume ${esc(med.medKey)}</code>`;
+  await reply(ctx, `${word} <b>${esc(med.name)}</b>${onBehalf(ap)}.${undo}`);
+  // A medicine falling silent is the failure this whole bot exists to prevent, so the
+  // other chats hear about it even when the patient did it to themselves.
+  await tellTheOthers(
+    ctx, ap,
+    `⏹ <b>${esc(ap.patient.displayName)}</b> — ${esc(med.name)} ${word.toLowerCase()} by ${esc(ctx.userName)}.`,
+    true,
+  );
 }
 
 async function cmdTz(ctx: CmdCtx, args: string): Promise<void> {
