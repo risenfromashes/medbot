@@ -462,7 +462,12 @@ export async function handleCallback(
     const line =
       status === 'skipped'
         ? `⏭ <b>${esc(label)}</b> — skipped${chats.length > 1 ? ` by ${esc(userName)}` : ''}`
-        : renderConfirmation(label, takenAt, z, chats.length > 1 ? userName : null, cb.a === 'earlier');
+        : renderConfirmation(
+            label, takenAt, z, chats.length > 1 ? userName : null, cb.a === 'earlier',
+            // Which dose this was. After a long nag the medicine's name and a timestamp
+            // are not enough to tell a late confirmation from a second dose.
+            dose.firstPromptAt,
+          );
     await broadcast(dctx, chats, line);
     if (status === 'taken' && cb.a !== 'earlier' && med !== null) {
       await noteSpacedNeighbours(ctx, patient.id, med, takenAt);

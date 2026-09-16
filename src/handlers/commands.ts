@@ -1379,25 +1379,48 @@ async function cmdLog(ctx: CmdCtx, args: string): Promise<void> {
   args = ap.rest;
   const days = Math.min(30, Math.max(1, Number(args.trim()) || 7));
   const since = ap.z.addLocalDays(ap.z.localDay(ctx.now), -(days - 1));
-  const rows = await ctx.db.adherence(ap.patient.id, since);
   const meds = await ctx.db.medsFor(ap.patient.id, true);
-  const byMed = new Map<number, { taken: number; missed: number; skipped: number }>();
-  for (const r of rows) {
-    const e = byMed.get(r.medId) ?? { taken: 0, missed: 0, skipped: 0 };
-    if (r.status === 'taken') e.taken = r.n;
-    if (r.status === 'missed') e.missed = r.n;
-    if (r.status === 'skipped') e.skipped = r.n;
-    byMed.set(r.medId, e);
+  const byId = new Map(meds.map((m) => [m.id, m]));
+  const history = await ctx.db.doseHistory(ap.patient.id, since);
+
+  // What the log is for: the doses themselves, newest first. It used to answer with a
+  // percentage per medicine, which is a report card -- nobody opens the log to be graded,
+  // they open it to settle "did that one get taken, and when".
+  const lines: string[] = [];
+  let day = '';
+  let taken = 0;
+  let missed = 0;
+  let skipped = 0;
+  for (const h of history) {
+    const med = byId.get(h.medId);
+    if (med === undefined) continue;
+    if (h.status === 'taken') taken++;
+    else if (h.status === 'missed') missed++;
+    else skipped++;
+
+    const d = ap.z.localDay(h.at);
+    if (d !== day) {
+      day = d;
+      const back = ap.z.diffLocalDays(d, ap.z.localDay(ctx.now));
+      lines.push('', `<b>${back === 0 ? 'Today' : back === 1 ? 'Yesterday' : esc(d)}</b>`);
+    }
+    const step = med.steps[h.step];
+    const label = med.steps.length > 1 && step !== undefined ? `${step.name} (${h.step + 1}/${med.steps.length})` : med.name;
+    const icon = h.status === 'taken' ? '✅' : h.status === 'skipped' ? '⏭' : '❌';
+    const tail = h.status === 'taken'
+      ? (h.src === 'auto' ? ' <i>(auto)</i>' : '')
+      : ` — <i>${h.status}</i>`;
+    lines.push(`${icon} ${ap.z.fmtTime12(h.at)} ${esc(label)}${tail}`);
   }
-  const lines = meds
-    .filter((m) => byMed.has(m.id))
-    .map((m) => {
-      const e = byMed.get(m.id)!;
-      const total = e.taken + e.missed + e.skipped;
-      const pct = total === 0 ? 0 : Math.round((e.taken / total) * 100);
-      return `• <b>${esc(m.name)}</b> — ${e.taken}/${total} taken (${pct}%)${e.missed > 0 ? `, ${e.missed} missed` : ''}${e.skipped > 0 ? `, ${e.skipped} skipped` : ''}`;
-    });
-  await reply(ctx, lines.length > 0 ? `<b>Last ${days} days</b>\n${lines.join('\n')}` : 'Nothing logged yet.');
+
+  if (lines.length === 0) {
+    await reply(ctx, `Nothing logged in the last ${days} day${days === 1 ? '' : 's'}.`);
+    return;
+  }
+  const tally = [`${taken} taken`, missed > 0 ? `${missed} missed` : '', skipped > 0 ? `${skipped} skipped` : '']
+    .filter((x) => x !== '')
+    .join(' · ');
+  await reply(ctx, `<b>Last ${days} days</b> — ${tally}${lines.join('\n')}`);
 }
 
 async function cmdHealth(ctx: CmdCtx): Promise<void> {

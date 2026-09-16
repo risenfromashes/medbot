@@ -1697,6 +1697,36 @@ export class Db {
       n: num(r['n']),
     }));
   }
+
+  /**
+   * The doses themselves, newest first -- what /log is actually for.
+   *
+   * A percentage answers "how am I doing"; what someone reaches for the log to settle is
+   * "did that get taken, and when". Those are different questions and the second one is
+   * the one with a wrong answer you can act on.
+   */
+  async doseHistory(
+    patientId: number,
+    sinceDay: string,
+    limit = 60,
+  ): Promise<Array<{ medId: number; step: number; status: DoseStatus; at: number; src: string | null }>> {
+    const res = await this.d1
+      .prepare(
+        `SELECT med_id, step, status, COALESCE(taken_at, resolved_at) AS at, resolution_src FROM doses
+         WHERE patient_id = ?1 AND local_day >= ?2 AND status IN ('taken','missed','skipped')
+           AND COALESCE(taken_at, resolved_at) IS NOT NULL
+         ORDER BY at DESC LIMIT ?3`,
+      )
+      .bind(patientId, sinceDay, limit)
+      .all<Row>();
+    return (res.results ?? []).map((r) => ({
+      medId: num(r['med_id']),
+      step: num(r['step']),
+      status: str(r['status']) as DoseStatus,
+      at: num(r['at']),
+      src: r['resolution_src'] === null ? null : str(r['resolution_src']),
+    }));
+  }
 }
 
 // --- row mappers ---------------------------------------------------------

@@ -174,3 +174,54 @@ describe('stopping a medicine leaves a trail', () => {
     expect(Number(bot.d1.one("SELECT COUNT(*) c FROM medications WHERE med_key='flexi' AND status='active'")?.['c'])).toBe(1);
   });
 });
+
+describe('/log', () => {
+  it('lists the doses themselves, newest first', async () => {
+    await setUp();
+    await bot.run(30 * 60_000);
+    await bot.tap(PATIENT, /Taken|✅ Mox/);
+    bot.clear();
+    await bot.send(PATIENT, '/log');
+    const text = bot.last(PATIENT);
+    expect(text, 'still a report card rather than a log').not.toMatch(/%/);
+    expect(text).toMatch(/Today/);
+    expect(text, 'no dose in the log at all').toMatch(/✅ .*Moxifloxacin/);
+  });
+
+  it('counts what happened without grading it', async () => {
+    await setUp();
+    await bot.run(30 * 60_000);
+    await bot.tap(PATIENT, /Taken|✅ Mox/);
+    bot.clear();
+    await bot.send(PATIENT, '/log');
+    expect(bot.last(PATIENT)).toMatch(/1 taken/);
+  });
+
+  it('says so plainly when nothing has been logged', async () => {
+    await setUp();
+    bot.clear();
+    await bot.send(PATIENT, '/log');
+    expect(bot.last(PATIENT)).toMatch(/Nothing logged/);
+  });
+
+  it('marks a skipped dose as skipped rather than dropping it', async () => {
+    await setUp();
+    await bot.run(30 * 60_000);
+    await bot.tap(PATIENT, /Skip|⏭/);
+    bot.clear();
+    await bot.send(PATIENT, '/log');
+    expect(bot.last(PATIENT)).toMatch(/⏭/);
+  });
+});
+
+describe('meal questions do not depend on a medicine needing them', () => {
+  it('still asks about meals once every meal-anchored medicine is stopped', async () => {
+    await setUp();
+    await bot.send(PATIENT, '/stop flexi');
+    bot.clear();
+    await bot.run(14 * 3600_000, 10 * 60_000);
+    const asked = bot.textsTo(PATIENT).filter((t) => /breakfast|lunch|dinner/i.test(t));
+    expect(asked.length, 'meal tracking stopped with the last medicine that used it')
+      .toBeGreaterThan(0);
+  });
+});

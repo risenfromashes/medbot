@@ -18,11 +18,27 @@ export interface Rendered {
   buttons: InlineButton[][];
 }
 
-/** Escalating nudge wording. Gentle first, plainer later; never scolding. */
-function overdueLine(nudge: number, overdueMs: number, z: Zone, dueAt: number): string {
+/**
+ * Escalating nudge wording. Gentle first, plainer later; never scolding.
+ *
+ * `askedSince` -- when this dose was *first* put in front of someone -- is what the
+ * lateness is measured from, and it is the whole point of this function. A dose's
+ * `effectiveDueAt` moves while the prompt sits unanswered: min-gap, spacing and bedtime
+ * all push it forward. So a drop first asked about at 8:49pm was still being nagged at
+ * 11:47pm under the words "9m overdue — due at 11:38pm", which is indistinguishable from
+ * a brand-new dose. Someone read it as a second dose and took one. The time it was first
+ * asked about does not move, and after the first nudge the message says outright that
+ * this is the same dose, not another one.
+ */
+function overdueLine(nudge: number, now: number, z: Zone, dueAt: number, askedSince: number | null): string {
   if (nudge === 0) return '';
-  if (nudge === 1) return `\n<i>Still waiting on this one — due at ${z.fmtTime12(dueAt)}.</i>`;
-  return `\n⚠️ <i>${fmtDuration(overdueMs)} overdue</i> — due at ${z.fmtTime12(dueAt)}.`;
+  const since = askedSince ?? dueAt;
+  if (nudge === 1) return `\n<i>Still waiting on this one — due at ${z.fmtTime12(since)}.</i>`;
+  return (
+    `\n⚠️ <i>Still the ${z.fmtTime12(since)} dose</i> — not a new one. ` +
+    `Unanswered for ${fmtDuration(Math.max(0, now - since))}, asked ${nudge} times.` +
+    `\n<i>Already taken it? Use “🕐 Taken earlier…” so the schedule stays right.</i>`
+  );
 }
 
 export function renderDosePrompt(
@@ -41,7 +57,6 @@ export function renderDosePrompt(
 
   const first = items[0]!;
   const dueAt = Math.min(...items.map((i) => i.dose.effectiveDueAt));
-  const overdue = Math.max(0, now - dueAt);
 
   const who = opts.forCaregiver === true ? `${esc(opts.patientName ?? 'They')} ` : '';
   const lines: string[] = [];
@@ -89,7 +104,13 @@ export function renderDosePrompt(
     );
   }
 
-  lines.push(overdueLine(prompt.nudgeCount, overdue, z, dueAt));
+  // Measured from the earliest first-prompt across the items, for the same reason: it is
+  // the one time in the dose that does not get rescheduled out from under the reader.
+  const askedSince = items
+    .map((i) => i.dose.firstPromptAt)
+    .filter((t): t is number => t !== null)
+    .reduce<number | null>((a, b) => (a === null ? b : Math.min(a, b)), null);
+  lines.push(overdueLine(prompt.nudgeCount, now, z, dueAt, askedSince));
 
   const buttons: InlineButton[][] = [];
   if (items.length === 1) {
@@ -317,18 +338,28 @@ export function renderMealPrompt(
 }
 
 /** The short line every linked chat gets once someone answers. */
+/**
+ * `forDose` is when the bot first asked for this one. Naming it closes the same gap the
+ * nudge wording does, from the other end: "taken 11:47pm" says nothing about *which*
+ * dose was just recorded, and after three hours of nagging that is exactly what the
+ * reader needs to know. Only shown when the two times are far enough apart to matter.
+ */
 export function renderConfirmation(
   medLabel: string,
   takenAt: number,
   z: Zone,
   byName: string | null,
   corrected: boolean,
+  forDose: number | null = null,
 ): string {
   const when = z.fmtTime12(takenAt);
   const by = byName !== null ? `, confirmed by ${esc(byName)}` : '';
+  const which = forDose !== null && Math.abs(takenAt - forDose) >= 30 * MINUTE
+    ? ` <i>(the ${z.fmtTime12(forDose)} dose)</i>`
+    : '';
   return corrected
-    ? `✅ <b>${esc(medLabel)}</b> — recorded as taken at ${when}${by}. Schedule updated.`
-    : `✅ <b>${esc(medLabel)}</b> — taken ${when}${by}`;
+    ? `✅ <b>${esc(medLabel)}</b> — recorded as taken at ${when}${which}${by}. Schedule updated.`
+    : `✅ <b>${esc(medLabel)}</b> — taken ${when}${which}${by}`;
 }
 
 /**
