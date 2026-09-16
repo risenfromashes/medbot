@@ -319,3 +319,98 @@ describe('the food gate, judged per meal', () => {
       .toEqual(['2026-09-14', '2026-09-15']);
   });
 });
+
+describe('a dose is never left pointing at a dead prompt', () => {
+  const DROPS = {
+    version: 1, timezone: 'Asia/Dhaka',
+    day: { morning_poll_at: '06:30', presumed_wake_at: '09:00', evening_poll_at: '22:30', presumed_sleep_at: '23:00' },
+    groups: [{ id: 'drops', spacing: '10m' }],
+    medicines: [
+      { id: 'moxi', name: 'Moxi', dose: '1 drop', schedule: { type: 'interval', every: '2h', anchor: 'wake' }, group: 'drops', group_seq: 1, course: { days: 7 } },
+      { id: 'sonexa', name: 'Sonexa', dose: '1 drop', schedule: { type: 'interval', every: '4h', anchor: 'wake' }, group: 'drops', group_seq: 2, course: { days: 7 } },
+    ],
+  };
+
+  it('releases the dose when its prompt is closed', async () => {
+    // Left `prompted` against a cancelled prompt, a dose goes permanently quiet: nothing
+    // re-prompts it (only a dose with no prompt gets one) and nothing nudges it.
+    await setUp(DROPS);
+    await bot.run(20 * MINUTE, 5 * MINUTE);
+    const row = bot.d1.one("SELECT id, prompt_id FROM doses WHERE status='prompted'");
+    expect(row).not.toBeNull();
+    const { Db } = await import('../src/io/db.js');
+    await new Db(bot.d1 as never).closePrompt(Number(row!['prompt_id']), 'cancelled', bot.now);
+
+    const after = bot.d1.one(`SELECT status, prompt_id FROM doses WHERE id = ${Number(row!['id'])}`)!;
+    expect(after['prompt_id'], 'the dose still points at a closed prompt').toBeNull();
+    expect(after['status'], 'the dose was left prompted with nothing to prompt it').toBe('due');
+  });
+
+  it('heals a dose already stranded that way, and asks again', async () => {
+    await setUp(DROPS);
+    await bot.run(20 * MINUTE, 5 * MINUTE);
+    const row = bot.d1.one("SELECT id, prompt_id FROM doses WHERE status='prompted'")!;
+    // Exactly the live state: prompt gone, dose still claiming to be prompted.
+    bot.d1.sqlite.exec(`UPDATE prompts SET state='cancelled' WHERE id=${Number(row['prompt_id'])}`);
+    bot.clear();
+    await bot.run(30 * MINUTE, 5 * MINUTE);
+    expect(
+      bot.textsTo(PATIENT).some((t) => /Time for/.test(t)),
+      'the medicine stayed silent about a dose that was due',
+    ).toBe(true);
+  });
+});
+
+describe('messages that have served their purpose are taken down', () => {
+  const DROPS = {
+    version: 1, timezone: 'Asia/Dhaka',
+    day: { morning_poll_at: '06:30', presumed_wake_at: '09:00', evening_poll_at: '22:30', presumed_sleep_at: '23:00' },
+    groups: [{ id: 'drops', spacing: '10m' }],
+    medicines: [
+      { id: 'moxi', name: 'Moxi', dose: '1 drop', schedule: { type: 'interval', every: '4h', anchor: 'wake' }, group: 'drops', group_seq: 1, course: { days: 7 } },
+      { id: 'aqua', name: 'Aquafresh', dose: '1 drop', schedule: { type: 'interval', every: '4h', anchor: 'wake' }, group: 'drops', group_seq: 2, course: { days: 7 } },
+    ],
+  };
+
+  it('deletes the "give it 10 minutes" note once that drop is answered', async () => {
+    await setUp(DROPS);
+    await bot.run(20 * MINUTE, 5 * MINUTE);
+    const first = bot.d1.one("SELECT d.id FROM doses d JOIN medications m ON m.id=d.med_id WHERE m.med_key='moxi' AND d.status IN ('due','prompted')");
+    expect(first).not.toBeNull();
+    await bot.sendCallback(PATIENT, encodeCallback({ a: 'take', doseId: Number(first!['id']) }));
+
+    const note = bot.sent.filter((m) => /Give it/.test(m.text)).at(-1);
+    expect(note, 'no spacing note was posted').toBeDefined();
+    const second = bot.d1.one("SELECT d.id FROM doses d JOIN medications m ON m.id=d.med_id WHERE m.med_key='aqua' AND d.status IN ('scheduled','due','prompted')")!;
+
+    const before = bot.calls.filter((c) => c.method === 'deleteMessage').length;
+    await bot.sendCallback(PATIENT, encodeCallback({ a: 'take', doseId: Number(second['id']) }));
+    const deleted = bot.calls.filter((c) => c.method === 'deleteMessage').length - before;
+    expect(deleted, 'the note with its live "Already did" button was left in the chat').toBeGreaterThan(0);
+  });
+
+  it('does not nudge a prompt the patient has just answered', async () => {
+    // The tick loads its snapshot, the patient answers, and the nudge lands afterwards —
+    // a reminder for a finished dose that nothing is left to clean up.
+    await setUp(DROPS);
+    await bot.run(40 * MINUTE, 5 * MINUTE);
+    const live = bot.d1.one("SELECT id, prompt_id FROM doses WHERE status='prompted'");
+    if (live === null) return;
+    const { Db } = await import('../src/io/db.js');
+    const db = new Db(bot.d1 as never);
+    const state = await db.loadState(1, z.localDay(bot.now), z.localDay(bot.now));
+
+    await bot.sendCallback(PATIENT, encodeCallback({ a: 'take', doseId: Number(live['id']) }));
+    bot.clear();
+    // The stale tick now tries to nudge the prompt that was just resolved.
+    const { dispatch } = await import('../src/handlers/dispatch.js');
+    const { Telegram } = await import('../src/io/telegram.js');
+    await dispatch(
+      { db, tg: new Telegram('test-token', 40), z, now: bot.now },
+      state!,
+      [{ t: 'nudgePrompt', promptId: Number(live['prompt_id']), at: bot.now }],
+      { doseIds: new Map(), promptIds: new Map() },
+    );
+    expect(bot.textsTo(PATIENT), 'nudged a dose that was already taken').toEqual([]);
+  });
+});

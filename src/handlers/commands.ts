@@ -23,7 +23,7 @@ import { Db } from '../io/db.js';
 import { AdminDb } from '../io/adminDb.js';
 import { Telegram, esc } from '../io/telegram.js';
 import type { Env, TgIncomingMessage } from '../types.js';
-import { broadcast, clearPromptMessages } from './dispatch.js';
+import { broadcast, clearDoseNotes, clearPromptMessages } from './dispatch.js';
 import { encodeCallback } from '../core/callbackCodec.js';
 
 export const COMMANDS = [
@@ -1002,6 +1002,7 @@ async function cmdTook(ctx: CmdCtx, args: string): Promise<void> {
       await ctx.db.closePrompt(live.promptId, 'resolved', ctx.now);
       await clearPromptMessages(dctx, live.promptId);
     }
+    if (live !== null) await clearDoseNotes(dctx, live.id);
     const line = renderConfirmation(label, outcome.takenAt, z, ctx.userName, outcome.takenAt < ctx.now - 2 * MINUTE);
     await reply(ctx, line + warn);
     await broadcast(dctx, chats, line, ctx.chatId);
@@ -1699,14 +1700,24 @@ export async function noteSpacedNeighbours(
   if (waiting.length === 0) return;
 
   const lines = waiting.map((w) => `• <b>${esc(w.label)}</b> — ${z.fmtTime12(w.at)}`);
-  await reply(
-    ctx,
+  const sent = await ctx.tg.sendMessage(
+    ctx.chatId,
     `⏳ <b>Give it ${esc(fmtDuration(spacing))}.</b>\n\n${lines.join('\n')}\n\n` +
       `<i>I'll remind you. Tap below only if you have already done ${waiting.length === 1 ? 'it' : 'them'}.</i>`,
-    waiting.slice(0, 3).map((w) => [
-      { text: `✅ Already did ${w.label.slice(0, 20)}`, callback_data: encodeCallback({ a: 'take', doseId: w.doseId }) },
-    ]),
+    {
+      replyMarkup: {
+        inline_keyboard: waiting.slice(0, 3).map((w) => [
+          { text: `✅ Already did ${w.label.slice(0, 20)}`, callback_data: encodeCallback({ a: 'take', doseId: w.doseId }) },
+        ]),
+      },
+    },
   );
+  // Remembered against every dose it offers, so whichever of them is answered first takes
+  // the note down with it rather than leaving a live button on finished business.
+  const messageId = sent.result?.message_id;
+  if (messageId !== undefined) {
+    for (const w of waiting) await ctx.db.noteMessage(w.doseId, ctx.chatId, messageId, ctx.now);
+  }
 }
 
 /** A paste that arrived in pieces, if one is still in progress. */

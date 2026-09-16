@@ -15,7 +15,7 @@ import { parseDuration } from '../core/timeparse.js';
 import { SPREAD_FROM, SPREAD_TO, dosesPerDayInterval } from '../core/prescription.js';
 import { Db } from '../io/db.js';
 import { Telegram, esc } from '../io/telegram.js';
-import { broadcast, clearPromptMessages } from './dispatch.js';
+import { broadcast, clearDoseNotes, clearPromptMessages } from './dispatch.js';
 import {
   actingFor, applyImport, bedtimeButtons, editMenuFor, forceSleep, goodnightMessage,
   noteSpacedNeighbours, offerMissedSince, resolveBedtime,
@@ -436,6 +436,7 @@ export async function handleCallback(
       await db.closePrompt(dose.promptId, 'resolved', now);
       await clearPromptMessages(dctx, dose.promptId);
     }
+    await clearDoseNotes(dctx, dose.id);
 
     await ack(status === 'taken' ? '✅ Recorded' : '⏭ Skipped');
 

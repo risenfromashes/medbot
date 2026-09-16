@@ -415,6 +415,17 @@ export class Db {
             this.d1
               .prepare('UPDATE prompts SET state = ?2, resolved_at = ?3 WHERE id = ?1')
               .bind(realPrompt(a.promptId), a.state, a.at),
+            // A closed prompt must not leave a dose pointing at it. `prompted` with a
+            // dead prompt is the quietest failure this system has: nothing re-prompts it,
+            // because a new prompt is only made for a dose whose prompt_id is null, and
+            // nothing nudges it, because the prompt is gone. The medicine simply stops.
+            this.d1
+              .prepare(
+                `UPDATE doses SET prompt_id = NULL,
+                   status = CASE WHEN status = 'prompted' THEN 'due' ELSE status END
+                 WHERE prompt_id = ?1`,
+              )
+              .bind(realPrompt(a.promptId)),
           );
           break;
 
@@ -1094,10 +1105,48 @@ export class Db {
   }
 
   async closePrompt(promptId: number, state: Prompt['state'], now: number): Promise<void> {
-    await this.d1
-      .prepare('UPDATE prompts SET state = ?2, resolved_at = ?3 WHERE id = ?1')
-      .bind(promptId, state, now)
-      .run();
+    await this.d1.batch([
+      this.d1
+        .prepare('UPDATE prompts SET state = ?2, resolved_at = ?3 WHERE id = ?1')
+        .bind(promptId, state, now),
+      // See applyActions: a dose left `prompted` against a closed prompt goes silent.
+      this.d1
+        .prepare(
+          `UPDATE doses SET prompt_id = NULL,
+             status = CASE WHEN status = 'prompted' THEN 'due' ELSE status END
+           WHERE prompt_id = ?1`,
+        )
+        .bind(promptId),
+    ]);
+  }
+
+  /**
+   * Notes posted about a dose that are not prompts -- the "give it ten minutes, and here
+   * is a button if you already did" that follows a spaced drop.
+   *
+   * They need taking down when the dose they are about is answered, or the chat keeps an
+   * "✅ Already did Prednisolone" button live long after Prednisolone was done, and
+   * tapping it says something confusing about a dose that has moved on.
+   */
+  async noteMessage(doseId: number, chatId: number, messageId: number, now: number): Promise<void> {
+    const key = `note:${doseId}`;
+    const raw = await this.kvGet(key);
+    const list = raw === null || raw === '' ? [] : (JSON.parse(raw) as Array<[number, number]>);
+    list.push([chatId, messageId]);
+    await this.kvSet(key, JSON.stringify(list.slice(-6)));
+    void now;
+  }
+
+  async takeDownNotes(doseId: number): Promise<Array<{ chatId: number; messageId: number }>> {
+    const key = `note:${doseId}`;
+    const raw = await this.kvGet(key);
+    if (raw === null || raw === '') return [];
+    await this.kvSet(key, '');
+    try {
+      return (JSON.parse(raw) as Array<[number, number]>).map(([chatId, messageId]) => ({ chatId, messageId }));
+    } catch {
+      return [];
+    }
   }
 
   async promptMessages(promptId: number): Promise<Array<{ chatId: number; messageId: number | null }>> {

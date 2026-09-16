@@ -227,6 +227,12 @@ export async function dispatch(
       const promptId = ids.promptIds.get(a.promptId) ?? a.promptId;
       const prompt = state.openPrompts.find((q) => q.id === promptId);
       if (prompt === undefined) continue;
+      // Read it again before buzzing anybody. The tick loaded its snapshot a minute ago,
+      // and the patient may have answered in between -- in which case the resolution has
+      // already deleted this prompt's messages, and a nudge sent now is a reminder for a
+      // dose that is done, sitting in the chat for ever with nothing left to clean it up.
+      const current = await ctx.db.getPrompt(promptId);
+      if (current === null || current.state !== 'open') continue;
       const bumped: Prompt = { ...prompt, nudgeCount: prompt.nudgeCount + 1 };
       const involved = prompt.body.doseIds
         .map((id) => doses.get(id))
@@ -298,6 +304,14 @@ export async function clearPromptMessages(ctx: DispatchCtx, promptId: number): P
 }
 
 /** A short line to every chat linked to the patient. Used for confirmations. */
+/** Take down any side-note posted about this dose. */
+export async function clearDoseNotes(ctx: DispatchCtx, doseId: number): Promise<void> {
+  for (const note of await ctx.db.takeDownNotes(doseId)) {
+    if (ctx.tg.exhausted) return;
+    await ctx.tg.deleteMessage(note.chatId, note.messageId);
+  }
+}
+
 export async function broadcast(
   ctx: DispatchCtx,
   chats: Chat[],

@@ -192,6 +192,15 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
     let med = effectiveMed(rawMed, z, today);
     let live = liveByMed.get(med.id) ?? null;
 
+    // Heal a dose stranded against a prompt that is no longer open. It cannot be
+    // re-prompted (only a dose with no prompt gets one) and cannot be nudged (the prompt
+    // is gone), so it sits due for ever while the bot says nothing about it.
+    if (live !== null && live.status === 'prompted' && live.promptId !== null &&
+        !openPrompts.some((q) => q.id === live!.promptId)) {
+      emit({ t: 'setDoseStatus', doseId: live.id, status: 'due' });
+      live = { ...live, status: 'due', promptId: null };
+    }
+
     // A phase advance cancels whatever was scheduled under the old phase. Leaving the
     // stale dose in hand meant this pass believed the medicine was covered and created
     // nothing, so it had no live dose at all until the next tick -- a gap /status
