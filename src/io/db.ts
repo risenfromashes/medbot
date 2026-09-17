@@ -1192,6 +1192,11 @@ export class Db {
     source: MealEvent['source'],
     plannedAt: number | null = null,
     byChat: number | null = null,
+    /** When the write happened. The audit used to stamp itself with the *meal's* time,
+     *  which makes the log say a dinner was recorded at dinner time however long after
+     *  the fact the button was actually pressed -- and that gap is exactly what goes
+     *  wrong with meals. */
+    writtenAt: number | null = null,
   ): Promise<void> {
     const before = byChat === null
       ? null
@@ -1214,8 +1219,8 @@ export class Db {
         : [
             this.d1
               .prepare('INSERT INTO audit_log (patient_id, at, kind, med_id, dose_id, actor, detail_json) VALUES (?1,?2,?3,NULL,NULL,?4,?5)')
-              .bind(patientId, at, 'meal_set', String(byChat), JSON.stringify({
-                meal, localDay,
+              .bind(patientId, writtenAt ?? at, 'meal_set', String(byChat), JSON.stringify({
+                meal, localDay, at,
                 prev: before === null
                   ? null
                   : { at: num(before['at']), source: str(before['source']), plannedAt: numOrNull(before['planned_at']) },

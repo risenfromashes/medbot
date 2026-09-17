@@ -225,3 +225,78 @@ describe('meal questions do not depend on a medicine needing them', () => {
       .toBeGreaterThan(0);
   });
 });
+
+/**
+ * A meal answered after midnight.
+ *
+ * "Ifti hasn't confirmed dinner around 10:22pm" was answered at gone one in the morning,
+ * by which time the bot had marked her asleep. The callback took the day from *now* while
+ * storing the meal's own time, so 10:22pm on the 16th was filed under the 17th -- and the
+ * next afternoon /status opened with "✅ dinner 10:22pm", eight hours before it happened,
+ * while the planner treated dinner as already eaten and never asked again.
+ */
+describe('a meal confirmed after midnight', () => {
+  it('files it under the evening it belongs to, not the day the button was pressed', async () => {
+    await setUp();
+    // Through the evening until the bot proposes a dinner time, then leave it unanswered.
+    const proposed = (): boolean => bot.sent.some(
+      (m) => m.chatId === PATIENT && /dinner/i.test(m.text) && m.buttons.flat().some((b) => b.text.startsWith('✅ Yes,')),
+    );
+    for (let i = 0; i < 24 * 6 && !proposed(); i++) {
+      await bot.tick();
+      bot.now += 10 * 60_000;
+    }
+    expect(proposed(), 'the bot never proposed a dinner time').toBe(true);
+
+    // Answer it well after midnight, with the patient marked asleep in between.
+    await bot.send(PATIENT, '/sleep');
+    bot.now = at('01:40', 1);
+    await bot.tick();
+    await bot.tap(PATIENT, /Yes,|Eating now/);
+
+    const rows = bot.d1.rows("SELECT local_day, at FROM meal_events WHERE meal='dinner'");
+    expect(rows.length).toBeGreaterThan(0);
+    for (const r of rows) {
+      const day = z.localDay(Number(r['at']));
+      expect(r['local_day'], 'a meal filed on a day its own time is not in').toBe(day);
+    }
+  });
+
+  it('does not show a previous evening dinner as today already eaten', async () => {
+    await setUp();
+    const patientId = Number(bot.d1.one('SELECT id FROM patients')?.['id']);
+    // The exact row that was in the live database: last night's dinner, today's day key.
+    bot.d1.rows(
+      `INSERT INTO meal_events (patient_id, meal, local_day, at, source) VALUES (${patientId}, 'dinner', '2026-09-14', ${at('22:22', -1)}, 'presumed')`,
+    );
+    bot.now = at('13:37');
+    await bot.send(PATIENT, '/awake');
+    bot.clear();
+    await bot.send(PATIENT, '/status');
+    const text = bot.last(PATIENT);
+    expect(text, 'last night’s dinner shown as eaten today').not.toMatch(/✅ dinner/);
+    expect(text, 'dinner dropped from the day entirely').toMatch(/dinner/);
+  });
+
+  it('still asks about dinner today when a stale row claims it happened', async () => {
+    await setUp();
+    const patientId = Number(bot.d1.one('SELECT id FROM patients')?.['id']);
+    bot.d1.rows(
+      `INSERT INTO meal_events (patient_id, meal, local_day, at, source) VALUES (${patientId}, 'dinner', '2026-09-14', ${at('22:22', -1)}, 'presumed')`,
+    );
+    bot.clear();
+    await bot.run(13 * 3600_000, 10 * 60_000);
+    expect(bot.textsTo(PATIENT).join('\n'), 'dinner was never asked about again')
+      .toMatch(/dinner/i);
+  });
+});
+
+describe('the meal audit trail', () => {
+  it('stamps when the meal was recorded, not when the meal was', async () => {
+    await setUp();
+    bot.now = at('20:30');
+    await bot.send(PATIENT, '/ate lunch 1pm');
+    const row = bot.d1.one("SELECT at FROM audit_log WHERE kind='meal_set' ORDER BY id DESC");
+    expect(Number(row?.['at']), 'the log claimed the write happened at lunchtime').toBe(at('20:30'));
+  });
+});

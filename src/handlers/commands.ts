@@ -885,7 +885,7 @@ async function cmdEating(ctx: CmdCtx, args: string): Promise<void> {
     return;
   }
 
-  await ctx.db.recordMeal(patient.id, meal, mealDayOf(z, patient, plannedAt), plannedAt, 'planned', plannedAt, ctx.chatId);
+  await ctx.db.recordMeal(patient.id, meal, mealDayOf(z, patient, plannedAt), plannedAt, 'planned', plannedAt, ctx.chatId, ctx.now);
   await ctx.db.wakeNow(patient.id, ctx.now);
   for (const q of await ctx.db.openPromptsFor(patient.id)) {
     if (q.kind === 'meal' && q.body.meal === meal) {
@@ -914,7 +914,7 @@ async function cmdAte(ctx: CmdCtx, args: string): Promise<void> {
     return;
   }
   const at = time?.at ?? ctx.now;
-  await ctx.db.recordMeal(patient.id, meal, mealDayOf(z, patient, at), at, 'confirmed', null, ctx.chatId);
+  await ctx.db.recordMeal(patient.id, meal, mealDayOf(z, patient, at), at, 'confirmed', null, ctx.chatId, ctx.now);
   await ctx.db.wakeNow(patient.id, ctx.now);
   for (const q of await ctx.db.openPromptsFor(patient.id)) {
     if (q.kind === 'meal' && q.body.meal === meal) {
@@ -1319,7 +1319,11 @@ async function statusFor(ctx: CmdCtx, view: { patient: Patient; z: Zone; isSelf:
   // explanation -- which is exactly how they disappeared in real use.
   {
     const defs = [...(await ctx.db.mealDefsFor(patient.id))].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
-    const events = await ctx.db.mealEventsFor(patient.id, mealDay);
+    // Filed under this day *and* actually belonging to it -- the same rule the planner
+    // reads by. A dinner confirmed after midnight once landed on the following day, and
+    // /status opened the afternoon with "✅ dinner 10:22pm", eight hours early.
+    const events = (await ctx.db.mealEventsFor(patient.id, mealDay))
+      .filter((e) => mealDayOf(z, patient, e.at) === mealDay);
     const offsets = wakeOffsets(defs);
     const anchor = patient.lastWakeAt ?? patient.wakeStateSince;
 

@@ -327,7 +327,12 @@ export async function handleCallback(
     // Either "yes, around then" / "push it back" against a proposed time, or a plain
     // "in about an hour".
     const plannedAt = cb.a === 'mealAt' ? cb.at : now + cb.inMinutes * MINUTE;
-    await db.recordMeal(patient.id, cb.meal, mealDayOf(z, patient, now), plannedAt, 'planned', plannedAt, chatId);
+    // The day comes from the meal's own time, never from when the button was pressed.
+    // "Dinner around 10:22pm?" can be answered at two in the morning, by which point the
+    // patient is marked asleep and `now` lands on the next calendar day -- so last
+    // night's dinner was filed under today, and today's /status opened with dinner
+    // already eaten at 10:22pm, hours before it would happen.
+    await db.recordMeal(patient.id, cb.meal, mealDayOf(z, patient, plannedAt), plannedAt, 'planned', plannedAt, chatId, now);
     await db.wakeNow(patient.id, now);
     for (const prompt of await db.openPromptsFor(patient.id)) {
       if (prompt.kind === 'meal' && prompt.body.meal === cb.meal) {
@@ -359,7 +364,7 @@ export async function handleCallback(
       return;
     }
     const z = zoneFor(patient.tz);
-    await db.recordMeal(patient.id, cb.meal, mealDayOf(z, patient, now), now, cb.a === 'ate' ? 'confirmed' : 'skipped', null, chatId);
+    await db.recordMeal(patient.id, cb.meal, mealDayOf(z, patient, now), now, cb.a === 'ate' ? 'confirmed' : 'skipped', null, chatId, now);
     await db.wakeNow(patient.id, now);
     for (const prompt of await db.openPromptsFor(patient.id)) {
       if (prompt.kind === 'meal' && prompt.body.meal === cb.meal) {

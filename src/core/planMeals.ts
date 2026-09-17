@@ -22,7 +22,7 @@
 import type { Action, MealDef, PatientState } from './domain.js';
 import type { LocalDay, Zone } from './tz.js';
 import { mealRefs } from './planSchedule.js';
-import { HOUR, MINUTE, tryParseWall } from './tz.js';
+import { HOUR, MINUTE, mealDayOf, tryParseWall } from './tz.js';
 
 export interface MealFacts {
   /** Per meal id: when to schedule against, and how firm that is. */
@@ -145,8 +145,18 @@ export function planMeals(
 
   let previousMealAt: number | null = null;
 
+  // A meal belongs to the waking day its own time falls in, and to no other. Reading the
+  // events back through the same rule that files them means a row written under the wrong
+  // day is ignored rather than believed -- and believing one is worse than missing it,
+  // because a meal the bot thinks has happened releases every after-meal medicine and is
+  // never asked about again.
+  const belongsToToday = (at: number): boolean =>
+    mealDayOf(z, { lastWakeAt: wakeAnchor, wakeState: awake ? 'awake' : 'asleep' }, at) === today;
+
   for (const [index, def] of defs.entries()) {
-    const event = state.mealEvents.find((e) => e.meal === def.meal && e.localDay === today);
+    const event = state.mealEvents.find(
+      (e) => e.meal === def.meal && e.localDay === today && belongsToToday(e.at),
+    );
 
     // --- already dealt with -------------------------------------------------
     if (event !== undefined && (event.source === 'confirmed' || event.source === 'presumed')) {
