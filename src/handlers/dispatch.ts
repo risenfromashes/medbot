@@ -105,13 +105,15 @@ function isPermanent(errorCode: number | undefined): boolean {
   return errorCode === 403 || errorCode === 400;
 }
 
+/** Returns the chats that actually received a message, so a caller can tell what landed. */
 async function sendTo(
   ctx: DispatchCtx,
   chats: Chat[],
   promptId: number,
   render: (forCaregiver: boolean) => Rendered,
   priority = 100,
-): Promise<void> {
+): Promise<Set<number>> {
+  const landed = new Set<number>();
   for (const chat of chats) {
     const r = render(chat.role === 'caregiver');
     const markup = r.buttons.length > 0 ? { inline_keyboard: r.buttons } : undefined;
@@ -130,6 +132,7 @@ async function sendTo(
     const res = await ctx.tg.sendMessage(chat.chatId, r.text, markup === undefined ? {} : { replyMarkup: markup });
     if (res.ok && res.result !== undefined) {
       await ctx.db.recordPromptMessage(promptId, chat.chatId, res.result.message_id, 'sent', ctx.now);
+      landed.add(chat.chatId);
       continue;
     }
 
@@ -147,6 +150,7 @@ async function sendTo(
       }, ctx.now);
     }
   }
+  return landed;
 }
 
 /**
@@ -239,17 +243,23 @@ export async function dispatch(
         .map((id) => doses.get(id))
         .filter((d): d is Dose => d !== undefined);
 
-      // Delete the superseded reminder first so the chat stays readable, then send a
-      // fresh one -- which is the only way the nudge actually buzzes the phone.
+      // Send the replacement first, take the superseded one down after -- and only in the
+      // chats where the replacement actually landed.
+      //
+      // The other order left a hole. Deleting first and then failing to send -- out of
+      // subrequest budget, a 429, a blip -- leaves the chat with no reminder at all, while
+      // `nag_count` has already been incremented, so the next attempt is a full backoff
+      // away: up to half an hour of silence about a dose that is already late. The reminder
+      // does not vanish now; at worst the chat briefly holds two, and the next nudge
+      // tidies up.
       const previous = await ctx.db.promptMessages(promptId);
-      for (const pm of previous) {
-        if (pm.messageId === null || ctx.tg.exhausted) continue;
-        await ctx.tg.deleteMessage(pm.chatId, pm.messageId);
-        await ctx.db.clearPromptMessage(promptId, pm.chatId);
-      }
-      await sendTo(ctx, chatsAtOrBelow(state, prompt.escalatedTier), promptId, (care) =>
+      const landed = await sendTo(ctx, chatsAtOrBelow(state, prompt.escalatedTier), promptId, (care) =>
         renderFor(bumped, involved, meds, state, ctx.z, ctx.now, care),
       );
+      for (const pm of previous) {
+        if (pm.messageId === null || !landed.has(pm.chatId) || ctx.tg.exhausted) continue;
+        await ctx.tg.deleteMessage(pm.chatId, pm.messageId);
+      }
       continue;
     }
 

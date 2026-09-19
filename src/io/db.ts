@@ -1288,6 +1288,7 @@ export class Db {
       this.d1
         .prepare(
           `UPDATE patients SET wake_state = ?2, wake_confidence = 'confirmed', wake_state_since = ?3,
+             wake_ask_after = NULL,
              last_wake_at = CASE WHEN ?2 = 'awake' THEN ?3 ELSE last_wake_at END,
              last_sleep_at = CASE WHEN ?2 = 'asleep' THEN ?3 ELSE last_sleep_at END,
              next_action_at = ?3
@@ -1303,19 +1304,62 @@ export class Db {
   /** Move tonight's bedtime, and wake the planner so it re-plans against the new one. */
   async setExpectedSleep(patientId: number, at: number | null, now: number): Promise<void> {
     await this.d1
-      .prepare('UPDATE patients SET expected_sleep_at = ?2, next_action_at = ?3 WHERE id = ?1')
+      .prepare(
+        `UPDATE patients SET expected_sleep_at = ?2,
+           next_action_at = MIN(COALESCE(next_action_at, ?3), ?3) WHERE id = ?1`,
+      )
       .bind(patientId, at, now)
       .run();
   }
 
-  /** Push back when the bot will next ask whether they are up. */
+  /**
+   * Push back when the bot will next ask whether they are up.
+   *
+   * `next_action_at` takes the *earlier* of the two. Writing the wake time straight in
+   * threw away whatever deadline was already there -- a dose about to come due, a nudge
+   * about to fire -- and the tick then skipped this patient entirely until the new time
+   * came round. "Ask me again in an hour" is a statement about the wake question, not a
+   * licence to go silent about everything else for an hour.
+   */
   async setExpectedWake(patientId: number, at: number | null, now: number): Promise<void> {
     await this.d1
       .prepare(
-        'UPDATE patients SET expected_wake_at = ?2, last_wake_check_at = ?3, next_action_at = ?2 WHERE id = ?1',
+        `UPDATE patients SET expected_wake_at = ?2, wake_ask_after = ?2, last_wake_check_at = ?3,
+           next_action_at = CASE WHEN ?2 IS NULL THEN next_action_at
+                                 ELSE MIN(COALESCE(next_action_at, ?2), ?2) END
+         WHERE id = ?1`,
       )
       .bind(patientId, at, now)
       .run();
+  }
+
+  /**
+   * Prompt messages still sitting in a chat for a prompt that is no longer open.
+   *
+   * Every close path is supposed to take its own messages down, and every one of them can
+   * miss: a `closeMealPrompt` that the tick's cleanup did not recognise, a delete that ran
+   * out of subrequest budget half way through a fan-out, a tick that ended between the two.
+   * Nothing retried any of it, so six days of answered reminders were still in the chat
+   * with live buttons. This is the sweep that makes the cleanup eventually-correct rather
+   * than best-effort.
+   */
+  async stalePromptMessages(
+    limit: number,
+  ): Promise<Array<{ promptId: number; chatId: number; messageId: number }>> {
+    const res = await this.d1
+      .prepare(
+        `SELECT pm.prompt_id, pm.chat_id, pm.message_id FROM prompt_messages pm
+           JOIN prompts p ON p.id = pm.prompt_id
+         WHERE pm.send_state = 'sent' AND pm.message_id IS NOT NULL AND p.state != 'open'
+         ORDER BY pm.prompt_id LIMIT ?1`,
+      )
+      .bind(limit)
+      .all<Row>();
+    return (res.results ?? []).map((r) => ({
+      promptId: num(r['prompt_id']),
+      chatId: num(r['chat_id']),
+      messageId: num(r['message_id']),
+    }));
   }
 
   /**
@@ -1750,6 +1794,7 @@ function rowToPatient(r: Row): Patient {
     minSleepMs: numOrNull(r['min_sleep_ms']) ?? 4 * 3_600_000,
     expectedSleepAt: numOrNull(r['expected_sleep_at']),
     expectedWakeAt: numOrNull(r['expected_wake_at']),
+    wakeAskAfter: numOrNull(r['wake_ask_after']),
     lastWakeCheckAt: numOrNull(r['last_wake_check_at']),
     bedLeadFirstMs: numOrNull(r['bed_lead_first_ms']) ?? 3_600_000,
     bedLeadSecondMs: numOrNull(r['bed_lead_second_ms']) ?? 1_800_000,

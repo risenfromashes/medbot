@@ -50,9 +50,17 @@ export async function runTick(env: Env, now: number): Promise<{ patients: number
       const idMaps = await db.applyActions(state, actions, now);
 
       // A prompt that was closed this tick still has messages sitting in people's chats.
+      // `closeMealPrompt` closes by meal rather than by id and was not matched here, so
+      // every answered meal question stayed in both chats with its buttons live.
       for (const a of actions) {
         if (a.t === 'closePrompt') {
           await clearPromptMessages({ db, tg, z, now }, idMaps.promptIds.get(a.promptId) ?? a.promptId);
+        } else if (a.t === 'closeMealPrompt') {
+          for (const q of state.openPrompts) {
+            if (q.kind === 'meal' && q.body.meal === a.meal) {
+              await clearPromptMessages({ db, tg, z, now }, q.id);
+            }
+          }
         }
       }
 
@@ -62,6 +70,16 @@ export async function runTick(env: Env, now: number): Promise<{ patients: number
       // One patient's failure must not stop the others, and it must be visible.
       await db.audit(pid, 'tick_error', 'system', { error: e instanceof Error ? e.message : String(e) }, now);
     }
+  }
+
+  // Whatever the close paths missed. Every one of them can fail half way -- a delete that
+  // ran out of subrequest budget, a tick that ended between the two writes -- and nothing
+  // retried any of it, so six days of answered reminders were still sitting in the chats
+  // with working buttons. A few per tick is enough to keep up and cheap enough to ignore.
+  for (const stale of await db.stalePromptMessages(5)) {
+    if (tg.exhausted) break;
+    await tg.deleteMessage(stale.chatId, stale.messageId);
+    await db.clearPromptMessage(stale.promptId, stale.chatId);
   }
 
   await db.heartbeat(now, new Date(now).toISOString().slice(0, 10));

@@ -269,6 +269,12 @@ export interface Patient {
   expectedSleepAt: number | null;
   /** While asleep: the earliest the bot will start asking whether they are up. */
   expectedWakeAt: number | null;
+  /**
+   * Do not ask "are you up?" before this. Set only when the patient says so -- the
+   * "+30 min" / "+1 hour" answers to the wake question. Distinct from `expectedWakeAt`,
+   * which is the bot's own guess and must never silence a question.
+   */
+  wakeAskAfter: number | null;
   lastWakeCheckAt: number | null;
   /** Leads for the two "still turning in?" prompts before the expected bedtime. */
   bedLeadFirstMs: number;

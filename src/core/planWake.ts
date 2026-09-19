@@ -113,13 +113,21 @@ export function planWake(
     // bed at eleven. The configured morning time says where asking may begin -- it never
     // says they are up.
     const morningRef = z.nextWallAtOrAfter(p.morningPollAt, p.wakeStateSince);
-    const askFrom = Math.max(sleepFloor, morningRef, p.expectedWakeAt ?? 0);
+    const askFrom = Math.max(sleepFloor, morningRef, p.expectedWakeAt ?? 0, p.wakeAskAfter ?? 0);
+
+    // "Ask me again in an hour" holds, and it holds against stirring in particular --
+    // because tapping that very button is itself activity, and would otherwise earn an
+    // immediate re-ask. This used to be enforced by parking the whole patient's timer an
+    // hour out, which silenced their medicines for the hour as well; the deferral belongs
+    // to the wake question alone.
+    const askLater = p.wakeAskAfter !== null && now < p.wakeAskAfter;
 
     // Anything they do after a full night's sleep is evidence, not proof. It earns a
     // question -- "did you just wake up?" -- rather than a decision, because the answer
     // is often "hours ago", and starting the day from the wrong moment misplaces every
     // dose in it.
-    const stirred = p.lastActivityAt !== null && p.lastActivityAt >= sleepFloor && p.lastActivityAt > p.wakeStateSince;
+    const stirred = !askLater
+      && p.lastActivityAt !== null && p.lastActivityAt >= sleepFloor && p.lastActivityAt > p.wakeStateSince;
 
     if (now >= askFrom || stirred) {
       const open = openPromptIds('wake')[0] ?? null;

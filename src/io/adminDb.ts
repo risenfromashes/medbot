@@ -504,6 +504,7 @@ function rowToPatientLite(r: Row): Patient {
     minSleepMs: numOrNull(r['min_sleep_ms']) ?? 4 * 3_600_000,
     expectedSleepAt: numOrNull(r['expected_sleep_at']),
     expectedWakeAt: numOrNull(r['expected_wake_at']),
+    wakeAskAfter: numOrNull(r['wake_ask_after']),
     lastWakeCheckAt: numOrNull(r['last_wake_check_at']),
     bedLeadFirstMs: numOrNull(r['bed_lead_first_ms']) ?? 3_600_000,
     bedLeadSecondMs: numOrNull(r['bed_lead_second_ms']) ?? 1_800_000,
