@@ -271,35 +271,85 @@ export class Db {
     }
     if (vacating.length > 0) await this.d1.batch(vacating);
 
-    const creates = actions.filter(
-      (a): a is Extract<Action, { t: 'createDose' } | { t: 'createPrompt' }> =>
-        a.t === 'createDose' || a.t === 'createPrompt',
+    // Doses first, and every insert carries the overdose guard with it.
+    //
+    // The planner works from a snapshot up to a minute old, and a tap can land in the
+    // middle of the tick. When it does, the medicine's `last_taken_at` has moved but the
+    // snapshot's has not, so `due = max(due, last_taken_at + min_gap)` is computed against
+    // a stale figure and a successor is written far too close to the dose just taken. The
+    // unique index cannot catch it: the dose that won has already left the index by
+    // becoming `taken`. This is how a drop taken at 1:31pm was asked for again at 1:41pm
+    // against a four-hour gap.
+    //
+    // So the floor is applied here as well, against the row as it stands at this instant.
+    // Steps within a spacing group are exempt: they are ten minutes apart by design and
+    // governed by the group's own spacing, not the medicine's gap.
+    const doseCreates = actions.filter(
+      (a): a is Extract<Action, { t: 'createDose' }> => a.t === 'createDose',
     );
-
-    if (creates.length > 0) {
-      const stmts = creates.map((a) =>
-        a.t === 'createDose'
-          ? this.d1
-              .prepare(
-                `INSERT INTO doses (patient_id, med_id, seq, step, local_day, planned_due_at,
-                                    effective_due_at, anchor_kind, status, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'scheduled',?9)`,
-              )
-              .bind(pid, a.medId, a.seq, a.step, a.localDay, a.plannedDueAt, a.effectiveDueAt, a.anchorKind, now)
-          : this.d1
-              .prepare(
-                `INSERT INTO prompts (patient_id, kind, state, body_json, created_at)
-                 VALUES (?1,?2,'open',?3,?4)`,
-              )
-              .bind(pid, a.kind, JSON.stringify(a.body), now),
+    const refused: Array<Extract<Action, { t: 'createDose' }>> = [];
+    if (doseCreates.length > 0) {
+      const results = await this.d1.batch(
+        doseCreates.map((a) =>
+          this.d1
+            .prepare(
+              `INSERT INTO doses (patient_id, med_id, seq, step, local_day, planned_due_at,
+                                  effective_due_at, anchor_kind, status, created_at)
+               SELECT ?1,?2,?3,?4,?5,?6,?7,?8,'scheduled',?9
+               WHERE ?4 > 0 OR NOT EXISTS (
+                 SELECT 1 FROM medications
+                  WHERE id = ?2 AND last_taken_at IS NOT NULL
+                    AND ?7 < last_taken_at + min_gap_ms)`,
+            )
+            .bind(pid, a.medId, a.seq, a.step, a.localDay, a.plannedDueAt, a.effectiveDueAt, a.anchorKind, now),
+        ),
       );
-      const results = await this.d1.batch(stmts);
       results.forEach((res, i) => {
-        const a = creates[i]!;
-        const id = num(res.meta.last_row_id);
-        if (a.t === 'createDose') doseIds.set(a.id, id);
-        else promptIds.set(a.id, id);
+        const a = doseCreates[i]!;
+        if (num(res.meta.changes ?? 0) === 0) {
+          refused.push(a);
+          return;
+        }
+        doseIds.set(a.id, num(res.meta.last_row_id));
       });
+    }
+
+    /** A dose the prompt can actually be about: already real, or just created. */
+    const exists = (id: number): boolean => id >= 0 || doseIds.has(id);
+
+    // A dose prompt whose every dose was refused has nothing to ask about, and asking
+    // anyway is precisely the message the guard exists to prevent.
+    const promptCreates = actions
+      .filter((a): a is Extract<Action, { t: 'createPrompt' }> => a.t === 'createPrompt')
+      .filter((a) => a.kind !== 'dose' || a.body.doseIds.some(exists));
+    const madePrompt = new Set(promptCreates.map((a) => a.id));
+
+    if (promptCreates.length > 0) {
+      const results = await this.d1.batch(
+        promptCreates.map((a) =>
+          this.d1
+            .prepare(
+              `INSERT INTO prompts (patient_id, kind, state, body_json, created_at)
+               VALUES (?1,?2,'open',?3,?4)`,
+            )
+            .bind(pid, a.kind, JSON.stringify(a.body), now),
+        ),
+      );
+      results.forEach((res, i) => {
+        promptIds.set(promptCreates[i]!.id, num(res.meta.last_row_id));
+      });
+    }
+
+    if (refused.length > 0) {
+      await this.d1.batch(
+        refused.map((a) =>
+          this.d1
+            .prepare('INSERT INTO audit_log (patient_id, at, kind, med_id, actor, detail_json) VALUES (?1,?2,?3,?4,?5,?6)')
+            .bind(pid, now, 'dose_refused', a.medId, 'system', JSON.stringify({
+              why: 'inside min_gap of the last recorded dose', seq: a.seq, at: a.effectiveDueAt,
+            })),
+        ),
+      );
     }
 
     const realDose = (id: number): number => doseIds.get(id) ?? id;
@@ -376,8 +426,9 @@ export class Db {
           break;
 
         case 'createPrompt': {
+          if (!madePrompt.has(a.id)) break; // every dose it would have named was refused
           const promptId = realPrompt(a.id);
-          for (const tempDoseId of a.body.doseIds) {
+          for (const tempDoseId of a.body.doseIds.filter(exists)) {
             rest.push(
               this.d1
                 .prepare("UPDATE doses SET prompt_id = ?2, status = 'prompted', first_prompt_at = COALESCE(first_prompt_at, ?3) WHERE id = ?1")
@@ -388,7 +439,7 @@ export class Db {
           rest.push(
             this.d1
               .prepare('UPDATE prompts SET body_json = ?2 WHERE id = ?1')
-              .bind(promptId, JSON.stringify({ ...a.body, doseIds: a.body.doseIds.map(realDose) })),
+              .bind(promptId, JSON.stringify({ ...a.body, doseIds: a.body.doseIds.filter(exists).map(realDose) })),
           );
           break;
         }
