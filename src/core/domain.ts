@@ -193,6 +193,8 @@ export interface Medicine {
    * eye drops needing ten minutes between them. Unlike the old group model this is a
    * constraint, not a merge: each medicine keeps its own schedule and its own course.
    */
+  /** When this medicine entered the system. The watchdog's origin of last resort. */
+  createdAt: number | null;
   spacingGroup: string | null;
   spacingMs: number;
   /** Explicit order within a spacing group, when the prescription gives one. */
@@ -485,6 +487,12 @@ export type Action =
       plannedAt?: number | null;
     }
   | { t: 'closeMealPrompt'; meal: string }
+  /**
+   * The watchdog found a medicine with no live dose and no way back. Clearing the planning
+   * cursor lets the medicine loop re-derive its next dose from `lastTakenAt` on the same
+   * tick, so the alert and the repair go out together.
+   */
+  | { t: 'rebuildSchedule'; medId: number; at: number }
   | { t: 'setNextAction'; at: number | null }
   /** A message that needs no answer: digests, watchdog alerts, course completions. */
   | { t: 'sendInfo'; text: string; tier: number; dedupe: string; priority?: number }

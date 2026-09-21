@@ -47,7 +47,7 @@ export function renderDosePrompt(
   meds: Map<number, Medicine>,
   z: Zone,
   now: number,
-  opts: { forCaregiver?: boolean; patientName?: string } = {},
+  opts: { forCaregiver?: boolean; patientName?: string; assumed?: boolean } = {},
 ): Rendered {
   const items = doses
     .map((d) => ({ dose: d, med: meds.get(d.medId) }))
@@ -101,6 +101,18 @@ export function renderDosePrompt(
   if (bm !== undefined) {
     lines.push(
       `\n⏱ <i>You said ${esc(bm.meal)} in about ${fmtDuration(bm.inMs)} — this one goes before it.</i>`,
+    );
+  }
+
+  // Dosing on an assumption, and saying so. The bot starts the day at the configured wake
+  // time when nobody has answered, because the alternative is a silent morning -- but the
+  // times it is quoting are a guess until someone corrects them, and a reminder that hides
+  // that is asking to be trusted further than it deserves.
+  if (opts.assumed === true) {
+    lines.push(
+      opts.forCaregiver === true
+        ? `\n<i>Assuming they're up — they haven't confirmed yet.</i>`
+        : `\n<i>Assuming you're up. Not up yet, or up earlier? Tell me and I'll redo the day's times.</i>`,
     );
   }
 

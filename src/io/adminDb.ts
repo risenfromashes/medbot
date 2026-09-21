@@ -542,6 +542,7 @@ function rowToMedLite(r: Row): Medicine {
     specHash: str(r['spec_hash']),
     steps: parse(r['steps_json'], [] as Medicine['steps']),
     stepSpacingMs: num(r['step_spacing_ms']),
+    createdAt: numOrNull(r['created_at']),
     spacingGroup: strOrNull(r['spacing_group']),
     spacingMs: num(r['spacing_ms'] ?? 0),
     groupSeq: numOrNull(r['group_seq']),

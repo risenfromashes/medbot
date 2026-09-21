@@ -68,11 +68,12 @@ function renderFor(
   z: Zone,
   now: number,
   forCaregiver: boolean,
+  assumed = false,
 ): Rendered {
   const name = state.patient.displayName;
   switch (prompt.kind) {
     case 'dose':
-      return renderDosePrompt(prompt, doses, meds, z, now, { forCaregiver, patientName: name });
+      return renderDosePrompt(prompt, doses, meds, z, now, { forCaregiver, patientName: name, assumed });
     case 'wake':
       return renderWakePrompt(prompt.nudgeCount, forCaregiver, name);
     case 'sleep':
@@ -202,6 +203,12 @@ export async function dispatch(
   const doses = doseLookup(state, actions, ids.doseIds);
   const meds = new Map(state.meds.map((m) => [m.id, m]));
 
+  // Including the transition this very tick, or the first reminder of a presumed morning
+  // -- the one that starts the day on a guess -- would be the only one not to say so.
+  const assumed =
+    actions.some((a) => a.t === 'setWake' && a.state === 'awake' && a.confidence === 'presumed')
+    || (state.patient.wakeState === 'awake' && state.patient.wakeConfidence === 'presumed');
+
   for (const a of actions) {
     if (ctx.tg.exhausted) return;
 
@@ -223,7 +230,7 @@ export async function dispatch(
         .filter((d): d is Dose => d !== undefined);
       const critical = involved.some((d) => meds.get(d.medId)?.critical === true);
       await sendTo(ctx, chatsAtOrBelow(state, a.tier), promptId, (care) =>
-        renderFor(prompt, involved, meds, state, ctx.z, ctx.now, care), critical ? 0 : 100,
+        renderFor(prompt, involved, meds, state, ctx.z, ctx.now, care, assumed), critical ? 0 : 100,
       );
       continue;
     }
@@ -254,7 +261,7 @@ export async function dispatch(
       // tidies up.
       const previous = await ctx.db.promptMessages(promptId);
       const landed = await sendTo(ctx, chatsAtOrBelow(state, prompt.escalatedTier), promptId, (care) =>
-        renderFor(bumped, involved, meds, state, ctx.z, ctx.now, care),
+        renderFor(bumped, involved, meds, state, ctx.z, ctx.now, care, assumed),
       );
       for (const pm of previous) {
         if (pm.messageId === null || !landed.has(pm.chatId) || ctx.tg.exhausted) continue;
@@ -298,7 +305,7 @@ export async function dispatch(
         .filter((d): d is Dose => d !== undefined);
       // Only the newly-reached tier is messaged; the tiers below already have it.
       await sendTo(ctx, chatsExactly(state, a.tier), promptId, (care) =>
-        renderFor(prompt, involved, meds, state, ctx.z, ctx.now, care),
+        renderFor(prompt, involved, meds, state, ctx.z, ctx.now, care, assumed),
       );
     }
   }

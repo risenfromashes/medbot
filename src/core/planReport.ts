@@ -19,6 +19,14 @@ const WATCHDOG_INTERVAL = 6 * HOUR;
 /** A medicine silent for this multiple of its own cycle is considered stuck. */
 const SILENCE_FACTOR = 3;
 const SILENCE_CAP = 26 * HOUR;
+/**
+ * No medicine is "stuck" before this much silence, however short its cycle.
+ *
+ * Three cycles of a two-hourly eye drop is six hours -- shorter than a night's sleep, so
+ * the alarm went off at five in the morning on both phones about a medicine that was
+ * working perfectly.
+ */
+const SILENCE_FLOOR = 14 * HOUR;
 
 export interface ReportFacts {
   wakeAt: number | null;
@@ -50,7 +58,14 @@ export function planReports(
     // A course that has simply run its length is finishing, not stuck. Alerting on it
     // would cry wolf at the end of every prescription, which is the fastest way to teach
     // someone to ignore the one alert that matters.
-    const stuck = state.meds.filter((m) => isSilent(m, now) && !courseComplete(m, now, z, today));
+    // A medicine with a live dose is not stuck -- it is being asked for and nobody is
+    // answering, which is a different thing and one the reminders themselves are already
+    // saying. Alerting on it meant the alarm fired on a medicine that was prompting,
+    // nagging and escalating exactly as designed, four times a day, indefinitely.
+    const hasLiveDose = new Set(state.liveDoses.map((d) => d.medId));
+    const stuck = state.meds.filter(
+      (m) => isSilent(m, now) && !hasLiveDose.has(m.id) && !courseComplete(m, now, z, today),
+    );
     if (stuck.length > 0) {
       const names = stuck.map((m) => m.name).join(', ');
       emit({
@@ -58,12 +73,17 @@ export function planReports(
         // Escalated, because by definition the patient is not seeing reminders for it.
         tier: 1,
         text:
-          `⚠️ <b>Something looks wrong.</b>\n\n` +
-          `No activity on ${names} for a long time, although it is still an active ` +
-          `prescription. Check with /status, or /meds to see the schedule.`,
+          `⚠️ <b>${names} has no next dose booked.</b>\n\n` +
+          `That is a fault at my end, not something you have missed. I'm rebuilding the ` +
+          `schedule for it now — you should get the next reminder within a few minutes.\n` +
+          `<i>If nothing arrives, <code>/resume ${names}</code> restarts it.</i>`,
         dedupe: `watchdog:${p.id}:${stuck.map((m) => m.id).join('-')}:${today}`,
         priority: 50,
       });
+      // Saying it is broken and leaving it broken is not a watchdog. Nothing here is
+      // live, so clearing the cursor is safe: the medicine loop re-derives the next dose
+      // from `lastTakenAt` on this same tick.
+      for (const m of stuck) emit({ t: 'rebuildSchedule', medId: m.id, at: now });
     }
     emit({ t: 'markWatchdogRun', at: now });
     wakeUps.push(now + WATCHDOG_INTERVAL);
@@ -81,10 +101,16 @@ export function planReports(
  */
 function isSilent(med: Medicine, now: number): boolean {
   if (med.status !== 'active' || med.kind === 'as_needed') return false;
-  const last = Math.max(med.lastTakenAt ?? 0, med.startedAt ?? 0);
-  if (last === 0) return false; // never started; nothing to be silent about yet
+  // When the schedule last did anything for this medicine -- planned a dose, not merely
+  // had one taken. Measuring only from a *taken* dose made a medicine that was being
+  // asked for and never answered look identical to one that had stopped working, and made
+  // one that had never been answered at all invisible for ever.
+  const last = Math.max(
+    med.lastTakenAt ?? 0, med.startedAt ?? 0, med.lastPlannedDueAt ?? 0, med.createdAt ?? 0,
+  );
+  if (last === 0) return false; // no timestamp of any kind; nothing to measure from
   const cycle = med.intervalMs ?? 12 * HOUR;
-  const threshold = Math.min(cycle * SILENCE_FACTOR, SILENCE_CAP);
+  const threshold = Math.min(Math.max(cycle * SILENCE_FACTOR, SILENCE_FLOOR), SILENCE_CAP);
   return now - last > threshold;
 }
 

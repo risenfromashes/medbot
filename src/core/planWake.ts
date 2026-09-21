@@ -36,6 +36,8 @@ export interface WakeFacts {
  * evidence -- much stronger than the clock -- so the window is short, not a full night.
  */
 const SETTLING_PERIOD = HOUR;
+/** How long the bot asks before it starts the day on its own assumption. */
+const PRESUME_AFTER_ASKING = HOUR;
 
 /**
  * How long the patient has to be quiet before the clock may call it a night.
@@ -76,12 +78,20 @@ export function planWake(
 
   const wakeUps: (number | null)[] = [];
 
-  const setState = (s: WakeState, c: WakeConfidence, at: number, source: string): void => {
+  /**
+   * `settle` closes the question this answers. A *presumed* wake settles nothing -- the
+   * bot has guessed, the guess drives the schedule, and the question stays open because a
+   * real answer still re-anchors the whole day.
+   */
+  const setState = (
+    s: WakeState, c: WakeConfidence, at: number, source: string, settle = true,
+  ): void => {
     wakeState = s;
     confidence = c;
     stateSince = at;
     if (s === 'awake') anchor = at;
     emit({ t: 'setWake', state: s, confidence: c, at, source });
+    if (!settle) return;
     // All of them, not the first found: two bedtime questions can be open at once -- the
     // hour-before and the half-hour-before -- and leaving one behind meant it nagged
     // through the night about a bedtime that had already happened.
@@ -98,6 +108,34 @@ export function planWake(
   const sleepFloor = p.wakeStateSince + p.minSleepMs;
   const settled = p.wakeStateSince + SETTLING_PERIOD;
 
+  // Both measured from when this sleep began, never from `now`.
+  //
+  // `nextWallAtOrAfter(morningPollAt, now)` returns *tomorrow's* 06:30 from 06:31 onwards,
+  // so one minute after the morning poll time the whole schedule believed the patient
+  // would next be up in twenty-four hours, and `clampToBedtime` parked every dose there.
+  // A drop due at half past two was booked for the following morning; it is the same
+  // arithmetic that put a Vigalon dose 27 hours out.
+  const askFrom = Math.max(
+    sleepFloor,
+    z.nextWallAtOrAfter(p.morningPollAt, p.wakeStateSince),
+    p.expectedWakeAt ?? 0,
+    p.wakeAskAfter ?? 0,
+  );
+  /**
+   * When dosing resumes whether or not anyone has answered.
+   *
+   * Never without having asked first: when the minimum sleep pushes the morning past the
+   * configured wake time -- a four in the morning bedtime against a nine o'clock wake --
+   * the two collapse onto the same instant and the assumption would arrive with no chance
+   * to answer it. An hour of asking is the floor.
+   */
+  const presumeFrom = Math.max(
+    sleepFloor,
+    z.nextWallAtOrAfter(p.presumedWakeAt, p.wakeStateSince),
+    askFrom + PRESUME_AFTER_ASKING,
+    p.wakeAskAfter ?? 0,
+  );
+
 
   if (wakeState === 'asleep') {
     // --- night ------------------------------------------------------------
@@ -112,8 +150,6 @@ export function planWake(
     // sleep" on its own would start asking at three in the morning for anyone who went to
     // bed at eleven. The configured morning time says where asking may begin -- it never
     // says they are up.
-    const morningRef = z.nextWallAtOrAfter(p.morningPollAt, p.wakeStateSince);
-    const askFrom = Math.max(sleepFloor, morningRef, p.expectedWakeAt ?? 0, p.wakeAskAfter ?? 0);
 
     // "Ask me again in an hour" holds, and it holds against stirring in particular --
     // because tapping that very button is itself activity, and would otherwise earn an
@@ -143,6 +179,32 @@ export function planWake(
     } else {
       push(wakeUps, askFrom);
       push(wakeUps, settled > now ? settled : null);
+    }
+
+    // Safety rule 1, and the whole reason it was written down: someone who leaves their
+    // phone on charge must still get every reminder. Asking is not enough on its own --
+    // an unanswered question had the bot sit out an entire morning and then write it up
+    // as three missed doses it had never once sent.
+    //
+    // So the configured wake time is where the bot stops waiting for an answer and starts
+    // the day on the assumption that they are up. It says it is assuming, it keeps the
+    // question open, and a real answer re-anchors every dose hung off it.
+    //
+    // The minimum sleep still wins: someone who went to bed at four is not dosed at nine
+    // because nine has come round.
+    push(wakeUps, presumeFrom > now ? presumeFrom : null);
+
+    if (now >= presumeFrom) {
+      setState('awake', 'presumed', presumeFrom, 'presumed', false);
+      // There must be something to correct it with. Normally the morning question is
+      // already open by now; if it was answered "+1 hour" and closed, ask again.
+      if (openPromptIds('wake').length === 0) {
+        emit({
+          t: 'createPrompt', id: 0, kind: 'wake', tier: 0,
+          body: { kind: 'wake', doseIds: [], proposedAt: presumeFrom },
+        });
+        emit({ t: 'markWakeCheck', at: now });
+      }
     }
   }
 
@@ -211,7 +273,7 @@ export function planWake(
     // and no earlier than the time the patient is normally asked about.
     earliestWake:
       wakeState === 'asleep'
-        ? Math.max(sleepFloor, z.nextWallAtOrAfter(p.morningPollAt, now))
+        ? presumeFrom
         : null,
   };
 }

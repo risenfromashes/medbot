@@ -240,6 +240,16 @@ export class World {
   /** Ticks where planning was skipped because nothing was scheduled. */
   skipped = 0;
 
+  /**
+   * Turn off while deliberately constructing a state the invariants forbid.
+   *
+   * Only for testing something whose entire job is to repair such a state -- the liveness
+   * watchdog -- which cannot otherwise be exercised, because the assertion that a medicine
+   * always has a live dose fires before the watchdog gets a chance to notice it has not.
+   * Turn it back on and the repair has to satisfy the same invariants as everything else.
+   */
+  checkInvariants = true;
+
   /** One tick: plan, apply, assert. */
   tick(): Action[] {
     if (this.respectSchedule) {
@@ -577,6 +587,17 @@ export class World {
           break;
         }
 
+        case 'rebuildSchedule': {
+          // Mirrors db.ts: only when nothing is live, and the cursor falls back to the
+          // last dose actually taken so the medicine re-derives from a real anchor.
+          const m = this.state.meds.find((x) => x.id === a.medId);
+          if (m !== undefined && !this.state.liveDoses.some((d) => d.medId === a.medId)) {
+            m.lastPlannedDueAt = null;
+            m.lastCycleStartAt = m.lastTakenAt ?? m.lastCycleStartAt;
+          }
+          break;
+        }
+
         case 'setNextAction':
           this.state.patient.nextActionAt = a.at;
           break;
@@ -627,6 +648,7 @@ export class World {
    * between a reminder system and a liability.
    */
   assertInvariants(): void {
+    if (!this.checkInvariants) return;
     const t = new Date(this.now).toISOString();
 
     // I3 -- no stacking. At most one live dose per medicine, ever.

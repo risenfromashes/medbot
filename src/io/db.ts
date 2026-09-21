@@ -493,6 +493,22 @@ export class Db {
           );
           break;
 
+        case 'rebuildSchedule':
+          rest.push(
+            this.d1
+              .prepare(
+                `UPDATE medications SET last_planned_due_at = NULL, last_cycle_start_at = COALESCE(last_taken_at, last_cycle_start_at)
+                 WHERE id = ?1 AND NOT EXISTS (
+                   SELECT 1 FROM doses WHERE med_id = ?1
+                     AND status IN ('scheduled','deferred','due','prompted'))`,
+              )
+              .bind(a.medId),
+            this.d1
+              .prepare('INSERT INTO audit_log (patient_id, at, kind, med_id, actor, detail_json) VALUES (?1,?2,?3,?4,?5,?6)')
+              .bind(pid, a.at, 'schedule_rebuilt', a.medId, 'watchdog', JSON.stringify({ why: 'no live dose' })),
+          );
+          break;
+
         case 'closeMealPrompt':
           rest.push(
             this.d1
@@ -979,7 +995,13 @@ export class Db {
         .bind(med.id, adv.lastTakenAt, adv.lastCycleStartAt, adv.lastPlannedDueAt, adv.nextSeq, adv.nextStep, adv.dosesTaken, Math.max(0, wasMissed ? med.dosesMissed - 1 : med.dosesMissed), adv.startedAt),
       this.d1
         .prepare(
-          `INSERT INTO day_counters (patient_id, med_id, local_day, taken, missed) VALUES (?1,?2,?3,1,?4)
+          // The insert branch gets its own value. `?4` is a *delta* -- minus one when a
+          // missed dose is being corrected to taken -- and the conflict branch floors it
+          // at zero. The insert branch did not, so when no counter row existed (which
+          // reconstruction used to guarantee) the row was created with missed = -1 and the
+          // digest printed "1 taken · -1 missed".
+          `INSERT INTO day_counters (patient_id, med_id, local_day, taken, missed)
+           VALUES (?1,?2,?3,1,CASE WHEN ?4 < 0 THEN 0 ELSE ?4 END)
            ON CONFLICT (patient_id, med_id, local_day) DO UPDATE SET taken = taken + 1, missed = MAX(0, missed + ?4)`,
         )
         .bind(dose.patientId, med.id, dose.localDay, wasMissed ? -1 : 0),
@@ -1444,11 +1466,40 @@ export class Db {
       made.push({ id: num(res.meta.last_row_id), at });
       seq++;
     }
+
+    // The same books every other resolution path keeps.
+    //
+    // Without the day_counters rows the evening digest reported "nothing recorded today"
+    // for a morning of missed doses, and -- worse -- a later correction to "actually I
+    // took that" hit the INSERT branch of `correctDose` with missed = -1, which has no
+    // MAX(0,...) guard, and printed "1 taken · -1 missed". Without the audit rows the
+    // write-off left no trace and /undo could not reach it.
+    await this.d1.batch([
+      ...times.map((at) =>
+        this.d1
+          .prepare(
+            `INSERT INTO day_counters (patient_id, med_id, local_day, taken, missed) VALUES (?1,?2,?3,0,1)
+             ON CONFLICT (patient_id, med_id, local_day) DO UPDATE SET missed = missed + 1`,
+          )
+          .bind(patientId, med.id, localDayOf(at)),
+      ),
+      ...made.map((m) =>
+        this.d1
+          .prepare('INSERT INTO audit_log (patient_id, at, kind, med_id, dose_id, actor, detail_json) VALUES (?1,?2,?3,?4,?5,?6,?7)')
+          .bind(patientId, now, 'dose_missed', med.id, m.id, 'reconstructed', JSON.stringify({
+            plannedFor: m.at, why: 'logged after the fact, from a stated wake time',
+          })),
+      ),
+    ]);
     const last = times[times.length - 1]!;
     await this.d1
       .prepare(
+        // MAX, never a bare assignment: a dose actually taken *after* the last
+        // reconstructed slot would otherwise rewind the grid onto a slot that never
+        // happened, and collapse the min-gap floor into the past.
         `UPDATE medications SET next_seq = ?2, doses_missed = doses_missed + ?3,
-           last_cycle_start_at = ?4, last_planned_due_at = ?4,
+           last_cycle_start_at = MAX(COALESCE(last_cycle_start_at, 0), ?4),
+           last_planned_due_at = MAX(COALESCE(last_planned_due_at, 0), ?4),
            started_at = COALESCE(started_at, ?5)
          WHERE id = ?1`,
       )
@@ -1892,6 +1943,7 @@ function rowToMed(r: Row): Medicine {
     specHash: str(r['spec_hash']),
     steps: json(r['steps_json'], [] as Medicine['steps']),
     stepSpacingMs: num(r['step_spacing_ms']),
+    createdAt: numOrNull(r['created_at']),
     spacingGroup: strOrNull(r['spacing_group']),
     spacingMs: num(r['spacing_ms'] ?? 0),
     groupSeq: numOrNull(r['group_seq']),

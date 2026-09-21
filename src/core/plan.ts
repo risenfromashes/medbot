@@ -381,7 +381,16 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
         facts.wakeAnchor + med.onsetOffsetMs,
         med.lastCycleStartAt === null ? -Infinity : med.lastCycleStartAt + med.minGapMs,
       );
-      const desired = Math.max(target, now);
+      // Members of a spacing group must not all re-anchor onto the same instant. Spacing
+      // separates live doses later in the pass, but a re-anchor collapses them first and
+      // whichever one is not in that pass -- created this tick, revived from deferral --
+      // comes due alongside its sibling and both are asked for at once. Staggering by the
+      // prescription's own order is stable: it depends on `group_seq`, never on `now`, so
+      // it places each dose once and cannot walk.
+      const stagger = med.spacingGroup !== null && med.spacingMs > 0
+        ? Math.max(0, (med.groupSeq ?? 1) - 1) * med.spacingMs
+        : 0;
+      const desired = Math.max(target, now) + stagger;
       const stranded = live.effectiveDueAt < facts.wakeAnchor;
       const parkedPastTheDay = live.effectiveDueAt > desired + MINUTE;
       if (!capped && (stranded || parkedPastTheDay) && desired !== live.effectiveDueAt) {

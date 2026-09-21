@@ -1707,12 +1707,14 @@ export async function offerMissedSince(ctx: CmdCtx, patientId: number, wokeAt: n
     lines.push(
       `• <b>${esc(med.name)}</b> — ${made.map((m) => z.fmtTime12(m.at)).join(', ')}`,
     );
-    // One button per medicine, against its most recent reconstructed dose: the common
-    // case is "yes I took these", not a per-dose audit at eleven in the morning.
-    const latest = made[made.length - 1];
-    if (latest !== undefined) {
+    // A button per dose, not one per medicine. With one, every reconstructed dose but the
+    // last was unreachable: the only way to correct them was to know the /took syntax.
+    for (const m of made.slice(-4)) {
       buttons.push([
-        { text: `✅ Took ${med.name.slice(0, 22)}`, callback_data: encodeCallback({ a: 'tookPast', doseId: latest.id }) },
+        {
+          text: `✅ Took ${med.name.slice(0, 16)} ${z.fmtTime12(m.at)}`,
+          callback_data: encodeCallback({ a: 'tookPast', doseId: m.id }),
+        },
       ]);
     }
   }
@@ -1721,7 +1723,8 @@ export async function offerMissedSince(ctx: CmdCtx, patientId: number, wokeAt: n
   await reply(
     ctx,
     `🕐 <b>While you were up but not telling me</b>\n\n${lines.join('\n')}\n\n` +
-      `I've logged those as missed for now. Tap below for anything you actually took, ` +
+      `I've logged those as missed for now — anything still due I'll ask about separately. ` +
+      `Tap below for anything you actually took, ` +
       `or <code>/took ${esc(meds[0]?.medKey ?? 'name')} 8am</code> to be exact.`,
     buttons,
   );

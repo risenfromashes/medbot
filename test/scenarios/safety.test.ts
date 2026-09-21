@@ -10,15 +10,17 @@ describe('the silent-failure guards', () => {
   it('never stops asking when the patient answers nothing at all', () => {
     // The worst realistic case: phone on charge, nobody touches it all morning.
     //
-    // The bot no longer decides at half past nine that they must be up -- guessing a wake
-    // time misplaces every dose hung off it, and dosing someone who is still asleep is the
-    // wrong error to make. What it must never do is go quiet, so the guarantee is that it
-    // keeps asking, and that the asking climbs to whoever backs them up.
+    // Asking is not enough on its own. A morning of unanswered questions once meant a
+    // morning of no medicine at all, written up afterwards as three missed doses that had
+    // never been sent -- so from the configured wake time the day starts on an assumption
+    // and the medicines go out. The question stays open the whole time, because the
+    // assumption is a guess and a real answer re-anchors everything hung off it.
     const w = new World({
       start: at(0, '05:00'),
       patient: {
         wakeState: 'asleep', wakeConfidence: 'confirmed',
         wakeStateSince: at(0, '00:00'), expectedWakeAt: at(0, '06:00'),
+        morningPollAt: '06:30', presumedWakeAt: '09:00',
       },
       meds: [makeMed({ id: 1, medKey: 'drop_a', intervalMs: 2 * HOUR })],
       chats: [makeChat({ chatId: 100 }), makeChat({ chatId: 200, escalationTier: 1, escalateAfterMs: 5 * MINUTE })],
@@ -32,8 +34,19 @@ describe('the silent-failure guards', () => {
       asked.some((m) => m.chatId === 200),
       'nobody else was told that she has not surfaced',
     ).toBe(true);
-    // And it did not invent a wake time to dose against.
-    expect(w.state.patient.wakeState).toBe('asleep');
+    // Still asking after it started dosing: the guess is never mistaken for an answer.
+    expect(
+      asked.some((m) => m.at >= at(0, '09:00')),
+      'stopped asking the moment it started assuming',
+    ).toBe(true);
+    // And the medicines actually went out.
+    expect(
+      w.sent.filter((m) => m.kind === 'dose').length,
+      'a whole morning of a two-hourly drop, never once asked for',
+    ).toBeGreaterThan(0);
+    // Marked as a guess, so /status and every reminder can say so.
+    expect(w.state.patient.wakeState).toBe('awake');
+    expect(w.state.patient.wakeConfidence, 'a guess recorded as a fact').toBe('presumed');
   });
 
   it('asks rather than assumes when the patient stirs', () => {
