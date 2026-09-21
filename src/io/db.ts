@@ -1079,7 +1079,7 @@ export class Db {
    */
   async updateMed(
     medId: number,
-    patch: Partial<Pick<Medicine, 'name' | 'doseText' | 'notes' | 'intervalMs' | 'minGapMs' | 'maxPerDay' | 'critical' | 'awakeOnly' | 'stepSpacingMs' | 'courseDays' | 'courseKind' | 'driftPolicy'>> & { spec?: Medicine['spec'] },
+    patch: Partial<Pick<Medicine, 'name' | 'doseText' | 'notes' | 'intervalMs' | 'minGapMs' | 'maxPerDay' | 'critical' | 'awakeOnly' | 'stepSpacingMs' | 'courseDays' | 'courseKind' | 'startedAt' | 'driftPolicy'>> & { spec?: Medicine['spec'] },
     opts: { rescheduleNow: boolean },
     now: number,
   ): Promise<void> {
@@ -1101,6 +1101,10 @@ export class Db {
     if (patch.stepSpacingMs !== undefined) put('step_spacing_ms', patch.stepSpacingMs);
     if (patch.courseDays !== undefined) put('course_days', patch.courseDays);
     if (patch.courseKind !== undefined) put('course_kind', patch.courseKind);
+    // Restarting a course moves its start. The day count is measured from here, so a
+    // seven-day course resumed today runs seven days from today, not seven from whenever
+    // it first began.
+    if (patch.startedAt !== undefined) put('started_at', patch.startedAt);
     if (patch.driftPolicy !== undefined) put('drift_policy', patch.driftPolicy);
     if (patch.spec !== undefined) {
       put('spec_json', JSON.stringify(patch.spec));
@@ -1542,6 +1546,11 @@ export class Db {
    * antibiotic on day five. A medicine that changed keeps its counters but loses its live
    * dose, which the next tick recomputes; one that disappeared is discontinued, never
    * deleted, because the history has to stay.
+   *
+   * The exception is a medicine coming back from stopped or completed: the prescription is
+   * prescribing a fresh course, so its course clock restarts from this import. Keeping the
+   * old start date meant a new "7 days" was measured from a week ago and finished before
+   * the first reminder went out.
    */
   async activatePrescription(
     versionId: number,
@@ -1594,7 +1603,22 @@ export class Db {
                max_per_day = ?13, awake_only = ?14, critical = ?15, drift_policy = ?16, drift_tolerance_ms = ?17,
                catchup_grace_ms = ?18, nag_policy_json = ?19, mergeable = ?20, course_kind = ?21, course_days = ?22,
                course_doses = ?23, course_until = ?24, spacing_group = ?25, spacing_ms = ?26,
-               group_seq = ?27, phases_json = ?28, status = 'active', version_id = ?29, next_step = 0
+               group_seq = ?27, phases_json = ?28, status = 'active', version_id = ?29, next_step = 0,
+               -- Bringing a medicine back is prescribing a new course of it, so the clock
+               -- the course is measured on starts again.
+               --
+               -- This is the whole bug: the update reactivated a finished medicine and
+               -- kept its old started_at, so a prescription that said seven days was
+               -- read against a start date a week old and the planner completed it on the
+               -- very next tick. /resume could not rescue it either -- it set the same
+               -- status the import had already set, against the same stale date.
+               --
+               -- Only for a medicine that was NOT active. One that is mid-course keeps
+               -- everything, which is the rule this file exists to protect: a corrected
+               -- prescription must not restart a seven-day antibiotic on day five.
+               started_at = CASE WHEN ?30 = 1 THEN NULL ELSE started_at END,
+               doses_taken = CASE WHEN ?30 = 1 THEN 0 ELSE doses_taken END,
+               doses_missed = CASE WHEN ?30 = 1 THEN 0 ELSE doses_missed END
              WHERE id = ?1`,
           )
           .bind(
@@ -1604,6 +1628,7 @@ export class Db {
             JSON.stringify(m.nagPolicy), m.mergeable ? 1 : 0, m.courseKind, m.courseDays, m.courseDoses,
             m.courseUntil, m.spacingGroup, m.spacingMs, m.groupSeq,
             m.phases === null ? null : JSON.stringify(m.phases), versionId,
+            prev.status === 'active' ? 0 : 1,
           ),
         this.d1
           .prepare(

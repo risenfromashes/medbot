@@ -25,6 +25,7 @@ import { Telegram, esc } from '../io/telegram.js';
 import type { Env, TgIncomingMessage } from '../types.js';
 import { broadcast, clearDoseNotes, clearPromptMessages, mealNews } from './dispatch.js';
 import { encodeCallback } from '../core/callbackCodec.js';
+import { courseComplete } from '../core/planSchedule.js';
 
 export const COMMANDS = [
   { command: 'status', description: "What's pending and what's next" },
@@ -228,6 +229,21 @@ async function tellTheOthers(ctx: CmdCtx, ap: Acting, text: string, always = fal
 /** "— for Ifti", appended when the acting chat is not the patient's own. */
 function onBehalf(ap: Acting): string {
   return ap.isSelf ? '' : ` — for <b>${esc(ap.patient.displayName)}</b>`;
+}
+
+/**
+ * Take a trailing duration off the arguments, leaving the medicine name.
+ *
+ * Mutates nothing: it returns the duration and the caller keeps the shortened name, so
+ * `/resume vigalon 7d` finds "vigalon" and seven days, while `/resume vigalon` -- and a
+ * medicine whose name genuinely ends in a number -- are left alone.
+ */
+function peelDuration(args: string): number | null {
+  const m = /\s+(\d+\s*(?:d(?:ays?)?|w(?:eeks?)?))\s*$/i.exec(args);
+  if (m === null) return null;
+  const weeks = /w/i.test(m[1]!);
+  const n = Number(/\d+/.exec(m[1]!)?.[0] ?? '0');
+  return n <= 0 ? null : n * (weeks ? 7 : 1) * 24 * HOUR;
 }
 
 /** Match a user-typed medicine name against the patient's list, loosely but safely. */
@@ -1446,6 +1462,10 @@ async function cmdMedStatus(ctx: CmdCtx, args: string, status: Medicine['status'
   const ap = await acting(ctx, args, 'the medicine');
   if (ap === null) return;
   args = ap.rest;
+  // Off the front of the matching, or `/resume vigalon 7d` looks for a medicine called
+  // "vigalon 7d".
+  const statedMs = status === 'active' ? peelDuration(args) : null;
+  if (statedMs !== null) args = args.replace(/\s+\S+\s*$/, '').trim();
   const meds = await ctx.db.medsFor(ap.patient.id, true);
   const matches = matchMed(meds, args);
   if (matches.length !== 1) {
@@ -1459,7 +1479,32 @@ async function cmdMedStatus(ctx: CmdCtx, args: string, status: Medicine['status'
   }
   const med = matches[0]!;
   const word = status === 'paused' ? 'Paused' : status === 'active' ? 'Resumed' : 'Stopped';
-  if (med.status === status) {
+
+  // Resuming a course that has already run its length.
+  //
+  // `/resume vigalon` set the medicine active, the planner saw that seven days had passed
+  // since it first started, and completed it again on the very next tick. The bot said
+  // "Resumed" and nothing happened. A course is a length, not a fixed pair of dates: if it
+  // is being resumed after it ran out, it runs again from today.
+  //
+  // `/resume vigalon 7d` says the length outright, which is what a new prescription
+  // usually means.
+  let restarted: string | null = null;
+  if (status === 'active') {
+    const days = statedMs === null ? null : Math.max(1, Math.round(statedMs / (24 * HOUR)));
+    const elapsed = courseComplete(med, ctx.now, ap.z, ap.z.localDay(ctx.now));
+    if (days !== null) {
+      await ctx.db.updateMed(
+        med.id, { courseKind: 'days', courseDays: days, startedAt: ctx.now }, { rescheduleNow: false }, ctx.now,
+      );
+      restarted = `${days} day${days === 1 ? '' : 's'} from today`;
+    } else if (elapsed && med.courseKind === 'days' && med.courseDays !== null) {
+      await ctx.db.updateMed(med.id, { startedAt: ctx.now }, { rescheduleNow: false }, ctx.now);
+      restarted = `a fresh ${med.courseDays} day${med.courseDays === 1 ? '' : 's'} from today`;
+    }
+  }
+
+  if (med.status === status && restarted === null) {
     await reply(ctx, `<b>${esc(med.name)}</b> is already ${word.toLowerCase()}.`);
     return;
   }
@@ -1473,7 +1518,11 @@ async function cmdMedStatus(ctx: CmdCtx, args: string, status: Medicine['status'
   );
   await ctx.db.wakeNow(ap.patient.id, ctx.now);
   const undo = status === 'active' ? '' : `\n<i>Undo with</i> <code>/resume ${esc(med.medKey)}</code>`;
-  await reply(ctx, `${word} <b>${esc(med.name)}</b>${onBehalf(ap)}.${undo}`);
+  const course = restarted === null
+    ? ''
+    : `\n<i>Its course had already run, so this is ${restarted}.</i>` +
+      `\n<i>Different length?</i> <code>/resume ${esc(med.medKey)} 10d</code>`;
+  await reply(ctx, `${word} <b>${esc(med.name)}</b>${onBehalf(ap)}.${course}${undo}`);
   // A medicine falling silent is the failure this whole bot exists to prevent, so the
   // other chats hear about it even when the patient did it to themselves.
   await tellTheOthers(
