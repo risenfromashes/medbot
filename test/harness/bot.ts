@@ -106,10 +106,11 @@ export class Bot {
   }
 
   /** Someone attaches a file. `content` is what the download will return. */
-  async sendFile(chatId: number, fileName: string, content: string): Promise<void> {
+  async sendFile(chatId: number, fileName: string, content: string, caption?: string): Promise<void> {
     this.responses.set('file', content);
     await this.deliver({
       message: {
+        ...(caption === undefined ? {} : { caption }),
         message_id: this.messageId++,
         from: { id: chatId, first_name: 'Tester' },
         chat: { id: chatId, type: 'private', first_name: 'Tester' },

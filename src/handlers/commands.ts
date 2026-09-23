@@ -271,7 +271,11 @@ export async function handleCommand(ctx: CmdCtx, msg: TgIncomingMessage): Promis
   // attaching one is the path most likely to work, so it should never need a command
   // in front of it.
   if (msg.document !== undefined) {
-    await cmdImport(ctx, args, msg);
+    // An attachment captioned /add adds; anything else attached is a whole prescription.
+    // Routing every document to /import meant a file captioned "/add" quietly replaced
+    // the lot -- and discontinued every medicine the file happened not to mention.
+    if (cmd === 'add' || cmd === 'new') await cmdAdd(ctx, args, msg);
+    else await cmdImport(ctx, args, msg);
     return;
   }
 
@@ -1556,6 +1560,27 @@ async function cmdTz(ctx: CmdCtx, args: string): Promise<void> {
 
 // --- prescriptions --------------------------------------------------------
 
+/** Fetch an attached file's text, replying and returning null if anything goes wrong. */
+async function readAttachment(ctx: CmdCtx, msg: TgIncomingMessage): Promise<string | null> {
+  if (msg.document === undefined) return null;
+  const size = msg.document.file_size ?? 0;
+  if (size > 512_000) {
+    await reply(ctx, "That file is far too large to be a prescription — is it the right one?");
+    return null;
+  }
+  const file = await ctx.tg.getFile(msg.document.file_id);
+  if (!file.ok || file.result === undefined) {
+    await reply(ctx, "I couldn't fetch that file from Telegram. Try sending it again.");
+    return null;
+  }
+  const content = await ctx.tg.downloadFile(file.result.file_path);
+  if (content === null) {
+    await reply(ctx, "I couldn't read that file. Try sending it again, or paste the JSON instead.");
+    return null;
+  }
+  return content;
+}
+
 async function cmdImport(ctx: CmdCtx, args: string, msg: TgIncomingMessage): Promise<void> {
   const ap = await acting(ctx, args, 'the prescription');
   if (ap === null) return;
@@ -1564,21 +1589,8 @@ async function cmdImport(ctx: CmdCtx, args: string, msg: TgIncomingMessage): Pro
   let raw = args.trim();
 
   if (msg.document !== undefined) {
-    const size = msg.document.file_size ?? 0;
-    if (size > 512_000) {
-      await reply(ctx, "That file is far too large to be a prescription — is it the right one?");
-      return;
-    }
-    const file = await ctx.tg.getFile(msg.document.file_id);
-    if (!file.ok || file.result === undefined) {
-      await reply(ctx, "I couldn't fetch that file from Telegram. Try sending it again.");
-      return;
-    }
-    const content = await ctx.tg.downloadFile(file.result.file_path);
-    if (content === null) {
-      await reply(ctx, "I couldn't read that file. Try sending it again, or paste the JSON instead.");
-      return;
-    }
+    const content = await readAttachment(ctx, msg);
+    if (content === null) return;
     raw = content;
     // A fresh file supersedes any half-finished paste.
     await ctx.db.kvSet(`import:${ctx.chatId}`, '');
@@ -2229,12 +2241,17 @@ async function cmdExtend(ctx: CmdCtx, args: string): Promise<void> {
  * shape as an entry in the `medicines` array, so whatever produced the original JSON can
  * produce this too.
  */
-async function cmdAdd(ctx: CmdCtx, args: string): Promise<void> {
+async function cmdAdd(ctx: CmdCtx, args: string, msg?: TgIncomingMessage): Promise<void> {
   const ap = await acting(ctx, args, 'the medicine');
   if (ap === null) return;
   args = ap.rest;
 
   let raw = args.trim();
+  if (msg?.document !== undefined) {
+    const content = await readAttachment(ctx, msg);
+    if (content === null) return;
+    raw = content;
+  }
   const fence = /```(?:json)?\s*([\s\S]*?)```/.exec(raw);
   if (fence !== null) raw = fence[1]!.trim();
 
@@ -2258,8 +2275,14 @@ async function cmdAdd(ctx: CmdCtx, args: string): Promise<void> {
     return;
   }
 
-  // Validate it exactly as an import would, by wrapping it in a one-medicine document.
-  const wrapped = { version: 1, medicines: Array.isArray(parsed) ? parsed : [parsed] };
+  // One medicine, a list of them, or a whole prescription document whose medicines are
+  // the part being added -- someone attaching a file to /add plainly means the last of
+  // those, and reading it as a single malformed medicine would only reject it.
+  const asDoc = parsed as { medicines?: unknown };
+  const list = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(asDoc?.medicines) ? asDoc.medicines : [parsed];
+  const wrapped = { version: 1, medicines: list };
   const result = parsePrescription(wrapped, { now: ctx.now });
   if (!result.ok) {
     await reply(ctx, `❌ <b>I couldn't use that</b>\n\n${result.errors.map((e) => `• ${esc(e)}`).join('\n')}`);
