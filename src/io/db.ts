@@ -1129,6 +1129,62 @@ export class Db {
   }
 
   /** Insert medicines into an existing prescription without disturbing the others. */
+  /**
+   * Begin a fresh course of a medicine that is already on the books.
+   *
+   * The counters go back to zero and the clock starts today, so "7 days" means seven days
+   * from now and /status counts from day one -- which is what a new prescription for
+   * something already taken before actually means. The individual dose rows are untouched,
+   * so nothing disappears from the log or the adherence history.
+   *
+   * `last_taken_at` and `last_cycle_start_at` are deliberately kept. They are the
+   * overdose guard: clearing them would let the first dose of the new course land inside
+   * the minimum gap from the last dose of the old one.
+   */
+  async restartCourse(
+    medId: number,
+    patch: { courseKind?: Medicine['courseKind']; courseDays?: number | null },
+    now: number,
+    actor: string,
+  ): Promise<void> {
+    const hasCourse = patch.courseKind !== undefined;
+    const row = await this.d1.prepare('SELECT * FROM medications WHERE id = ?1').bind(medId).first<Row>();
+    await this.d1.batch([
+      this.d1
+        .prepare(
+          `UPDATE medications
+              SET status = 'active', started_at = NULL, doses_taken = 0, doses_missed = 0,
+                  last_planned_due_at = NULL,
+                  course_kind = CASE WHEN ?2 = 1 THEN ?3 ELSE course_kind END,
+                  course_days = CASE WHEN ?2 = 1 THEN ?4 ELSE course_days END
+            WHERE id = ?1`,
+        )
+        .bind(medId, hasCourse ? 1 : 0, patch.courseKind ?? null, patch.courseDays ?? null),
+      // The old course's outstanding dose belongs to the old course.
+      this.d1
+        .prepare(
+          `UPDATE doses SET status = 'cancelled', resolved_at = ?2, resolution_src = 'restart'
+             WHERE med_id = ?1 AND status IN ('scheduled','deferred','due','prompted')`,
+        )
+        .bind(medId, now),
+      this.d1
+        .prepare('INSERT INTO audit_log (patient_id, at, kind, med_id, actor, detail_json) VALUES (?1,?2,?3,?4,?5,?6)')
+        .bind(
+          row === null ? null : num(row['patient_id']), now, 'course_restarted', medId, actor,
+          JSON.stringify({
+            previous: row === null ? null : {
+              status: str(row['status']),
+              startedAt: numOrNull(row['started_at']),
+              dosesTaken: num(row['doses_taken']),
+              dosesMissed: num(row['doses_missed']),
+              courseDays: numOrNull(row['course_days']),
+            },
+            courseDays: patch.courseDays ?? null,
+          }),
+        ),
+    ]);
+  }
+
   async addMedicines(patientId: number, meds: NormalizedPrescription['meds'], now: number): Promise<void> {
     if (meds.length === 0) return;
     await this.d1.batch(

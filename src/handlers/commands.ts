@@ -43,6 +43,7 @@ export const COMMANDS = [
   { command: 'prompt', description: 'Get the prompt for turning a prescription photo into JSON' },
   { command: 'edit', description: 'Change a medicine, e.g. /edit drops perday 3' },
   { command: 'extend', description: 'Add days to a course, e.g. /extend drops 3d' },
+  { command: 'restart', description: 'Start a fresh course of a medicine, e.g. /restart drops 7d' },
   { command: 'export', description: 'Get the current prescription back as JSON' },
   { command: 'log', description: 'Recent adherence' },
   { command: 'pause', description: 'Pause a medicine' },
@@ -293,6 +294,7 @@ export async function handleCommand(ctx: CmdCtx, msg: TgIncomingMessage): Promis
     case 'edit': case 'set': return cmdEdit(ctx, args);
     case 'extend': return cmdExtend(ctx, args);
     case 'add': case 'new': return cmdAdd(ctx, args);
+    case 'restart': return cmdRestart(ctx, args);
     case 'export': case 'prescription': return cmdExport(ctx);
     case 'log': case 'adherence': return cmdLog(ctx, args);
     case 'pause': return cmdMedStatus(ctx, args, 'paused');
@@ -2269,8 +2271,11 @@ async function cmdAdd(ctx: CmdCtx, args: string): Promise<void> {
   if (clash !== undefined) {
     await reply(
       ctx,
-      `There is already a medicine with the id <code>${esc(clash.medKey)}</code>. ` +
-        'Give it a different <code>id</code>, or use /edit to change the existing one.',
+      `There is already a medicine with the id <code>${esc(clash.medKey)}</code>.\n\n` +
+        `Another course of the same thing? <code>/restart ${esc(clash.medKey)} 7d</code> ` +
+        'starts the count again from today.\n' +
+        'Changing the one that is there? <code>/edit</code>. ' +
+        'A genuinely different medicine? Give it a different <code>id</code>.',
     );
     return;
   }
@@ -2284,6 +2289,75 @@ async function cmdAdd(ctx: CmdCtx, args: string): Promise<void> {
     ? `\n\n<b>Worth checking</b>\n${result.warnings.map((w) => `• ${esc(w)}`).join('\n')}`
     : '';
   await reply(ctx, `➕ <b>Added</b>\n${added}${warnings}`);
+}
+
+/**
+ * A fresh course of something already on the books.
+ *
+ * The gap between /add and /import. /add refuses an id that already exists, /import
+ * replaces the whole prescription, and /resume only picks a medicine up where it left off
+ * -- so a second course of a medicine already taken once had nowhere to go. This starts
+ * the count again from today: day one of seven, nothing taken yet, everything else about
+ * the prescription untouched.
+ */
+async function cmdRestart(ctx: CmdCtx, args: string): Promise<void> {
+  const ap = await acting(ctx, args, 'the medicine');
+  if (ap === null) return;
+  args = ap.rest;
+
+  const statedMs = peelDuration(args);
+  if (statedMs !== null) args = args.replace(/\s+\S+\s*$/, '').trim();
+
+  const meds = await ctx.db.medsFor(ap.patient.id, true);
+  if (args.trim() === '') {
+    await reply(
+      ctx,
+      '<b>Start a fresh course</b>\n\n' +
+        '<code>/restart drops 7d</code> — seven days from today, counters back to zero.\n' +
+        '<code>/restart drops</code> — the same length it had before, from today.\n\n' +
+        `${await medicineList(ctx, ap.patient.id)}`,
+    );
+    return;
+  }
+  const matches = matchMed(meds, args);
+  if (matches.length !== 1) {
+    await reply(
+      ctx,
+      matches.length === 0
+        ? `No medicine matching "${esc(args)}".\n\n${await medicineList(ctx, ap.patient.id)}`
+        : `Which one?\n\n${await medicineList(ctx, ap.patient.id)}`,
+    );
+    return;
+  }
+
+  const med = matches[0]!;
+  const days = statedMs === null ? null : Math.max(1, Math.round(statedMs / (24 * HOUR)));
+  await ctx.db.restartCourse(
+    med.id,
+    days === null ? {} : { courseKind: 'days', courseDays: days },
+    ctx.now,
+    String(ctx.chatId),
+  );
+  await ctx.db.wakeNow(ap.patient.id, ctx.now);
+
+  const length = days !== null
+    ? `${days} day${days === 1 ? '' : 's'}`
+    : med.courseKind === 'days' && med.courseDays !== null
+      ? `${med.courseDays} day${med.courseDays === 1 ? '' : 's'}`
+      : 'ongoing';
+  const before = med.dosesTaken > 0
+    ? `\n<i>The previous course — ${med.dosesTaken} taken — stays in /log.</i>`
+    : '';
+  await reply(
+    ctx,
+    `🔄 <b>${esc(med.name)}</b> — fresh course${onBehalf(ap)}.\n` +
+      `Day 1 of ${esc(length)}, counting from today.${before}`,
+  );
+  await tellTheOthers(
+    ctx, ap,
+    `🔄 <b>${esc(ap.patient.displayName)}</b> — ${esc(med.name)} restarted for ${esc(length)} by ${esc(ctx.userName)}.`,
+    true,
+  );
 }
 
 /** Who this chat can see and answer for, and who is watching over this patient. */
@@ -2551,9 +2625,10 @@ If I already logged a dose as missed and you actually took it, just tell me the 
 <b>Your prescription</b>
 <code>/prompt</code> — get the prompt for turning a photo into JSON
 <code>/import</code> — send new JSON (I preview it and wait for confirmation)
-<code>/add {...}</code> — add one medicine
+<code>/add {...}</code> — add one medicine, leaving the rest alone
 <code>/edit drops every 3h</code> — change one thing
-<code>/extend drops 3d</code> — lengthen a course
+<code>/extend drops 3d</code> — lengthen the course that is running
+<code>/restart drops 7d</code> — a <i>fresh</i> course of something already on the list: day one of seven, counters back to zero, nothing else touched
 <code>/meds</code> · <code>/export</code> · <code>/pause</code> · <code>/resume</code> · <code>/stop</code>
 <code>/log 7</code> — adherence · <code>/tz Asia/Dhaka</code>
 
