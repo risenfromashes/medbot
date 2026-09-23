@@ -118,3 +118,90 @@ If something is wrong, press Cancel and fix the JSON. Nothing changes until you 
 
 <i>I'm a reminder, not a doctor — and neither is the chatbot that wrote the JSON.</i>`,
 ];
+
+/**
+ * The same trick, for one medicine.
+ *
+ * `/add` takes a medicine as JSON, which is a lot to ask of someone typing on a phone.
+ * This is the prompt that gets a chatbot to write it -- and it asks for the finished
+ * `/add` line rather than a JSON blob, so what comes back is one thing to copy and send
+ * rather than something to assemble.
+ *
+ * Told what is already on the list, because the two ways this goes wrong are a clashing
+ * id (which /add refuses) and a meal name the patient does not have (which would produce
+ * a medicine that never fires).
+ */
+export function addMedicinePromptParts(ctx: { meals: string[]; existingIds: string[] }): string[] {
+  const meals = ctx.meals.length > 0 ? ctx.meals.join(", ") : "none set up yet";
+  const taken = ctx.existingIds.length > 0 ? ctx.existingIds.slice(0, 24).join(", ") : "(none yet)";
+  const mealNote = ctx.meals.length > 0
+    ? `My meals are: ${meals}`
+    : `I have no meals set up, so do NOT use a meal schedule or a pattern`;
+
+  return [
+    `➕ <b>Adding one medicine</b>
+
+1. Open any AI chatbot — Claude, ChatGPT, Gemini, whichever you have.
+2. Paste the message below, and either attach a photo of the prescription or
+   type out what it says where it asks.
+3. It gives you back a single line beginning with <code>/add</code>.
+4. Copy that line and send it to me.
+
+Nothing else on your list changes — this adds one medicine and leaves every
+other course exactly where it is.
+
+<i>Tap the block below to copy it.</i>`,
+
+    `<pre><code>I use a Telegram medication reminder bot. Help me add ONE medicine
+to my existing list.
+
+Reply with exactly one line I can copy, starting with /add, and nothing
+else -- no explanation, no code fence:
+
+/add {"id":"...","name":"...","dose":"...","schedule":{...},"course":{...}}
+
+THE MEDICINE: &lt;describe it here, or attach a photo of the prescription&gt;
+
+Fields:
+- "id": short, lowercase, no spaces. Must NOT be any of these, which I
+  already have: ${taken}
+- "name": as printed on the prescription
+- "dose": what to actually take, e.g. "1 drop, left eye" or "1 tablet"
+- "course": {"days":7} or {"doses":20} -- leave it out entirely for
+  something ongoing with no end date
+- "min_gap": the shortest SAFE gap between two doses. About three
+  quarters of the scheduled interval. Err on the longer side.
+
+Schedule -- pick the one that matches:
+- {"type":"interval","every":"2h","anchor":"wake"}
+  every N hours, counted from when I get up. Use "anchor":"clock"
+  only for genuine round-the-clock dosing.
+- {"type":"times_per_day","n":3}
+  spread across my waking hours. Prefer this for "3 times a day".
+- {"type":"fixed_times","times":["08:00","20:00"]}
+- {"type":"meal","meals":["breakfast"],"relation":"before","offset":"30m"}
+  relation is before, after or with.
+  ${mealNote}
+- {"type":"as_needed"}  for PRN/SOS. Add "max_per_day" and "min_gap".
+
+For the 1+0+1 notation write it verbatim instead of a schedule:
+  "pattern":"1+0+1", with "relation":"after" or "before"
+
+If it steps down partway through -- "4 times a day for 7 days, then 3
+times a day for 7 days" -- use phases instead of schedule, or the rest
+of the course is lost:
+  "phases":[{"schedule":{"type":"times_per_day","n":4},"days":7},
+            {"schedule":{"type":"times_per_day","n":3},"days":7}]
+
+If anything on the prescription is ambiguous, choose the safer reading
+and put what you were unsure about in a "notes" field.</code></pre>`,
+
+    `⚠️ <b>Check it against the paper before you send it.</b>
+
+I'll tell you exactly what I understood — the schedule and the course, in
+plain English — and nothing is added if the JSON doesn't parse. But I can't
+tell whether it matches what the doctor wrote. That part is yours.
+
+<i>I'm a reminder, not a doctor — and neither is the chatbot that wrote the JSON.</i>`,
+  ];
+}

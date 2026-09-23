@@ -8,7 +8,7 @@
 
 import type { Chat, Medicine, Patient } from '../core/domain.js';
 import { describeCourse, describeSchedule, dosesPerDayInterval, hashString, parsePrescription } from '../core/prescription.js';
-import { PRESCRIPTION_PROMPT_PARTS } from '../core/promptText.js';
+import { PRESCRIPTION_PROMPT_PARTS, addMedicinePromptParts } from '../core/promptText.js';
 import { describeJsonError, extractJson, looksLikeJsonFragment } from '../core/extractJson.js';
 import type { NormalizedPrescription } from '../core/prescription.js';
 import { renderConfirmation, renderEditMenu } from '../core/render.js';
@@ -40,7 +40,7 @@ export const COMMANDS = [
   { command: 'snooze', description: 'Push a reminder back, e.g. /snooze drops 15m' },
   { command: 'undo', description: 'Reverse the last thing you logged' },
   { command: 'import', description: 'Load a prescription (paste or attach the JSON)' },
-  { command: 'prompt', description: 'Get the prompt for turning a prescription photo into JSON' },
+  { command: 'prompt', description: 'Get a prompt to paste into a chatbot — prescription or one medicine' },
   { command: 'edit', description: 'Change a medicine, e.g. /edit drops perday 3' },
   { command: 'extend', description: 'Add days to a course, e.g. /extend drops 3d' },
   { command: 'restart', description: 'Start a fresh course of a medicine, e.g. /restart drops 7d' },
@@ -294,7 +294,7 @@ export async function handleCommand(ctx: CmdCtx, msg: TgIncomingMessage): Promis
     case 'status': return cmdStatus(ctx, args);
     case 'meds': case 'medicines': return cmdMeds(ctx, args);
     case 'import': return cmdImport(ctx, args, msg);
-    case 'prompt': case 'template': case 'json': return cmdPrompt(ctx);
+    case 'prompt': case 'template': case 'json': return cmdPrompt(ctx, args);
     case 'edit': case 'set': return cmdEdit(ctx, args);
     case 'extend': return cmdExtend(ctx, args);
     case 'add': case 'new': return cmdAdd(ctx, args);
@@ -1974,10 +1974,47 @@ async function cmdExport(ctx: CmdCtx): Promise<void> {
 }
 
 /** Hand over the prescription-conversion prompt, in chunks Telegram will accept. */
-async function cmdPrompt(ctx: CmdCtx): Promise<void> {
-  for (const part of PRESCRIPTION_PROMPT_PARTS) {
-    await reply(ctx, part);
+/**
+ * Hand out the copy-and-paste prompt -- for the whole prescription, or for one medicine.
+ *
+ * `/add` takes JSON, which is a great deal to ask of someone typing on a phone, so the
+ * same trick that handles the prescription handles a single medicine: the chatbot writes
+ * it. Asked plainly, because "which one do you want" as two buttons is quicker to answer
+ * than a syntax to remember.
+ */
+export async function sendPrompt(ctx: CmdCtx, kind: 'all' | 'add'): Promise<void> {
+  if (kind === 'all') {
+    for (const part of PRESCRIPTION_PROMPT_PARTS) await reply(ctx, part);
+    return;
   }
+
+  // Told what is already here: a clashing id is refused, and a meal the patient has not
+  // got would make a medicine that never fires.
+  const view = await actingPatient(ctx, '');
+  const meals: string[] = [];
+  const existingIds: string[] = [];
+  if (view !== null && !('ambiguous' in view)) {
+    for (const d of await ctx.db.mealDefsFor(view.patient.id)) meals.push(d.meal);
+    for (const m of await ctx.db.medsFor(view.patient.id, true)) existingIds.push(m.medKey);
+  }
+  for (const part of addMedicinePromptParts({ meals, existingIds })) await reply(ctx, part);
+}
+
+async function cmdPrompt(ctx: CmdCtx, args = ''): Promise<void> {
+  const want = args.trim().toLowerCase();
+  if (/^(add|one|medicine|single|new)\b/.test(want)) return sendPrompt(ctx, 'add');
+  if (/^(all|full|whole|prescription|import)\b/.test(want)) return sendPrompt(ctx, 'all');
+
+  await reply(
+    ctx,
+    '<b>What are you setting up?</b>\n\n' +
+      'Either way I give you a message to paste into any AI chatbot, and it writes the ' +
+      'JSON for you.',
+    [
+      [{ text: '📋 A whole prescription', callback_data: encodeCallback({ a: 'promptFor', kind: 'all' }) }],
+      [{ text: '➕ One more medicine', callback_data: encodeCallback({ a: 'promptFor', kind: 'add' }) }],
+    ],
+  );
 }
 
 /**
@@ -2646,9 +2683,9 @@ Tap ✅ on the reminder, or:
 If I already logged a dose as missed and you actually took it, just tell me the real time — I'll correct it and recalculate from there.
 
 <b>Your prescription</b>
-<code>/prompt</code> — get the prompt for turning a photo into JSON
+<code>/prompt</code> — get a message to paste into any chatbot, which writes the JSON for you. It asks whether you mean a whole prescription or one more medicine; <code>/prompt add</code> skips straight to the second.
 <code>/import</code> — send new JSON (I preview it and wait for confirmation)
-<code>/add {...}</code> — add one medicine, leaving the rest alone
+<code>/add {...}</code> — add one medicine, leaving the rest alone. <code>/prompt add</code> writes it for you.
 <code>/edit drops every 3h</code> — change one thing
 <code>/extend drops 3d</code> — lengthen the course that is running
 <code>/restart drops 7d</code> — a <i>fresh</i> course of something already on the list: day one of seven, counters back to zero, nothing else touched

@@ -17,7 +17,7 @@ import { Db } from '../io/db.js';
 import { Telegram, esc } from '../io/telegram.js';
 import { broadcast, clearDoseNotes, clearPromptMessages, mealNews } from './dispatch.js';
 import {
-  actingFor, applyImport, bedtimeButtons, editMenuFor, forceSleep, goodnightMessage,
+  actingFor, applyImport, bedtimeButtons, editMenuFor, forceSleep, goodnightMessage, sendPrompt,
   noteSpacedNeighbours, offerMissedSince, resolveBedtime,
 } from './commands.js';
 import type { CmdCtx } from './commands.js';
@@ -69,6 +69,14 @@ export async function handleCallback(
     const summary = await applyImport(ctx, cb.versionId);
     if (q.message !== undefined) await tg.editMessageText(chatId, q.message.message_id, summary);
     else await tg.sendMessage(chatId, summary);
+    return;
+  }
+
+  // --- handing out a copy-and-paste prompt -----------------------------------
+  if (cb.a === 'promptFor') {
+    await ack();
+    if (q.message !== undefined) await tg.deleteMessage(chatId, q.message.message_id);
+    await sendPrompt(ctx, cb.kind);
     return;
   }
 

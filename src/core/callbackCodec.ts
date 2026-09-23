@@ -47,6 +47,8 @@ export type Callback =
   | { a: 'cancelImport'; versionId: number }
   /** Break a caregiver link, from either side. */
   | { a: 'unlink'; chatId: number; patientId: number }
+  /** Which copy-and-paste prompt to hand out: a whole prescription, or one medicine. */
+  | { a: 'promptFor'; kind: 'all' | 'add' }
   | { a: 'noop' };
 
 const b36 = (n: number): string => Math.round(n).toString(36);
@@ -83,6 +85,7 @@ export function encodeCallback(cb: Callback): string {
     case 'confirmImport': return `i.${b36(cb.versionId)}`;
     case 'cancelImport': return `c.${b36(cb.versionId)}`;
     case 'unlink': return `U.${b36(Math.abs(cb.chatId))}.${cb.chatId < 0 ? 'n' : 'p'}.${b36(cb.patientId)}`;
+    case 'promptFor': return `H.${cb.kind}`;
     case 'noop': return '-';
   }
 }
@@ -107,6 +110,7 @@ export function decodeCallback(data: string): Callback {
         ? { a: 'bedtime', choice: parts[1] }
         : { a: 'noop' };
     case 'Z': return { a: 'sleepAnyway' };
+    case 'H': return { a: 'promptFor', kind: parts[1] === 'add' ? 'add' : 'all' };
     // Shifts are stored offset by twelve hours so a negative one still encodes cleanly.
     case 'D': return Number.isFinite(n(1)) ? { a: 'bedAt', shiftMinutes: n(1) - 720 } : { a: 'noop' };
     case 'N': return { a: 'bedNow' };

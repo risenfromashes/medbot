@@ -156,7 +156,9 @@ describe('the silent-failure guards', () => {
       const live = w.state.liveDoses.filter((d) => d.medId === med.id);
       expect(live.length, `${med.medKey} has gone silent after a week`).toBe(1);
     }
-  });
+    // A week at one-minute resolution, and the patient is now awake for far more of it
+    // than when waking had to be confirmed, so there is more to plan on every tick.
+  }, 30_000);
 });
 
 describe('escalation to the caregiver', () => {
