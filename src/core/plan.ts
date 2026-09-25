@@ -46,6 +46,8 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
 
   const out: Action[] = [];
   const nextTemp = tempIds();
+  /** Prompts this pass has already given up on, so section 5 does not go on nagging them. */
+  const closedThisTick = new Set<number>();
 
   // createDose / createPrompt reference rows that do not exist yet, so they carry a
   // negative placeholder id that the database layer swaps for a real one.
@@ -621,8 +623,28 @@ export function plan(rawState: PatientState, now: number, z: Zone): Action[] {
     }
   }
 
+  // --- 4c. close dose prompts with nothing left to ask about ---------------
+  //
+  // The mirror of the self-heal above, and the one that was missing. A dose prompt whose
+  // doses have all been answered, cancelled or discontinued has nothing to render: it
+  // comes out as "Nothing to take right now." and then nags that, on the ladder, to both
+  // chats, for ever. One had reached forty-one nudges about a medicine stopped the day
+  // before.
+  //
+  // Whatever stranded it -- a medicine stopped without closing its prompt, two ticks
+  // overlapping and each creating one for the same dose, a path nobody has thought of yet
+  // -- the cure is the same and it belongs here rather than at each of those sites.
+  for (const prompt of openPrompts) {
+    if (prompt.kind !== 'dose') continue;
+    const anyLive = prompt.body.doseIds.some((id) => state.liveDoses.some((d) => d.id === id));
+    if (anyLive) continue;
+    emit({ t: 'closePrompt', promptId: prompt.id, state: 'cancelled', at: now });
+    closedThisTick.add(prompt.id);
+  }
+
   // --- 5. nag and escalate open prompts -----------------------------------
   for (const prompt of openPrompts) {
+    if (closedThisTick.has(prompt.id)) continue;
     // Don't nag a sleeping patient about a non-critical dose. The prompt stays open and
     // resumes in the morning rather than being lost.
     // Sleep silences new nagging, but not for the first hour: a dose still outstanding at

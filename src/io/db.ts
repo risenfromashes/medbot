@@ -316,6 +316,7 @@ export class Db {
 
     /** A dose the prompt can actually be about: already real, or just created. */
     const exists = (id: number): boolean => id >= 0 || doseIds.has(id);
+    const realDoseId = (id: number): number => doseIds.get(id) ?? id;
 
     // A dose prompt whose every dose was refused has nothing to ask about, and asking
     // anyway is precisely the message the guard exists to prevent.
@@ -326,16 +327,43 @@ export class Db {
 
     if (promptCreates.length > 0) {
       const results = await this.d1.batch(
-        promptCreates.map((a) =>
-          this.d1
+        promptCreates.map((a) => {
+          // One open prompt per dose, whoever is asking.
+          //
+          // Nothing stops two ticks overlapping -- the cron fires every minute and there
+          // is no claim on a patient -- and when they do, both see the same dose due with
+          // no prompt and both create one. The dose can only point at one of them, so the
+          // other is stranded open with nobody to answer it, and nags "Nothing to take
+          // right now." until someone notices. `uq_dose_live` guards the doses against
+          // exactly this; the prompts had no equivalent.
+          const real = a.body.doseIds.filter(exists).map(realDoseId);
+          if (a.kind !== 'dose' || real.length === 0) {
+            return this.d1
+              .prepare(
+                `INSERT INTO prompts (patient_id, kind, state, body_json, created_at)
+                 VALUES (?1,?2,'open',?3,?4)`,
+              )
+              .bind(pid, a.kind, JSON.stringify(a.body), now);
+          }
+          const holes = real.map((_, i) => `?${i + 5}`).join(',');
+          return this.d1
             .prepare(
               `INSERT INTO prompts (patient_id, kind, state, body_json, created_at)
-               VALUES (?1,?2,'open',?3,?4)`,
+               SELECT ?1,?2,'open',?3,?4
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM doses d JOIN prompts p ON p.id = d.prompt_id
+                  WHERE d.id IN (${holes}) AND p.state = 'open')`,
             )
-            .bind(pid, a.kind, JSON.stringify(a.body), now),
-        ),
+            .bind(pid, a.kind, JSON.stringify(a.body), now, ...real);
+        }),
       );
       results.forEach((res, i) => {
+        if (num(res.meta.changes ?? 0) === 0) {
+          // Somebody else is already asking. Drop it entirely: leaving it in `madePrompt`
+          // would point the dose and its messages at a prompt row that was never written.
+          madePrompt.delete(promptCreates[i]!.id);
+          return;
+        }
         promptIds.set(promptCreates[i]!.id, num(res.meta.last_row_id));
       });
     }
@@ -1160,7 +1188,15 @@ export class Db {
             WHERE id = ?1`,
         )
         .bind(medId, hasCourse ? 1 : 0, patch.courseKind ?? null, patch.courseDays ?? null),
-      // The old course's outstanding dose belongs to the old course.
+      // The old course's outstanding dose belongs to the old course, and so does the
+      // question about it.
+      this.d1
+        .prepare(
+          `UPDATE prompts SET state = 'cancelled', resolved_at = ?2
+             WHERE state = 'open' AND id IN (
+               SELECT prompt_id FROM doses WHERE med_id = ?1 AND prompt_id IS NOT NULL)`,
+        )
+        .bind(medId, now),
       this.d1
         .prepare(
           `UPDATE doses SET status = 'cancelled', resolved_at = ?2, resolution_src = 'restart'
@@ -1213,6 +1249,17 @@ export class Db {
   async setMedStatus(medId: number, status: Medicine['status'], now: number): Promise<void> {
     await this.d1.batch([
       this.d1.prepare('UPDATE medications SET status = ?2 WHERE id = ?1').bind(medId, status),
+      // The prompt first, while the dose still points at it. Stopping a medicine used to
+      // cancel its dose and leave the question about that dose open, so the bot went on
+      // asking for a medicine nobody was taking any more -- forty-one times, in the case
+      // that brought this to light, to both chats.
+      this.d1
+        .prepare(
+          `UPDATE prompts SET state = 'cancelled', resolved_at = ?2
+             WHERE state = 'open' AND id IN (
+               SELECT prompt_id FROM doses WHERE med_id = ?1 AND prompt_id IS NOT NULL)`,
+        )
+        .bind(medId, now),
       this.d1
         .prepare(
           `UPDATE doses SET status = 'cancelled', resolved_at = ?2

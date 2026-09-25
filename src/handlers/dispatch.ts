@@ -213,7 +213,11 @@ export async function dispatch(
     if (ctx.tg.exhausted) return;
 
     if (a.t === 'createPrompt') {
-      const promptId = ids.promptIds.get(a.id) ?? a.id;
+      // No mapping means the row was never written -- the database refused it because
+      // another tick is already asking about the same dose. Sending it anyway would
+      // attach the message to a prompt id that does not exist.
+      const promptId = ids.promptIds.get(a.id);
+      if (promptId === undefined) continue;
       const prompt: Prompt = {
         id: promptId,
         patientId: state.patient.id,
@@ -249,6 +253,10 @@ export async function dispatch(
       const involved = prompt.body.doseIds
         .map((id) => doses.get(id))
         .filter((d): d is Dose => d !== undefined);
+      // Nothing left to ask about. The planner closes prompts in this state, but a nudge
+      // must never be the thing that discovers it: "Nothing to take right now.", on the
+      // nag ladder, to both chats, is the most annoying message this bot can send.
+      if (prompt.kind === 'dose' && involved.length === 0) continue;
 
       // Send the replacement first, take the superseded one down after -- and only in the
       // chats where the replacement actually landed.
